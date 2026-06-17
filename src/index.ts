@@ -5,6 +5,13 @@ import { executeBuy, getTokenRawAmount } from './executor';
 import { PublicKey } from '@solana/web3.js';
 import PQueue from 'p-queue';
 
+
+
+
+import './dashboard';
+
+
+
 const queue = new PQueue({ concurrency: 1 });
 const detector = new TokenDetector();
 const positionManager = new PositionManager();
