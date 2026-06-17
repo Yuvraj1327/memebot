@@ -2,91 +2,377 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>MemeRush Bot Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MemeRush Sniper Bot</title>
+  <!-- Primary CDN -->
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: #0d0d0d; color: #e0e0e0; font-family: monospace; padding: 24px; }
-    h1 { color: #00ff88; margin-bottom: 20px; font-size: 20px; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-    .card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px; padding: 16px; }
-    .card h3 { color: #00ff88; font-size: 13px; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 1px; }
-    .trade { padding: 6px 0; border-bottom: 1px solid #222; font-size: 12px; }
-    .trade.buy  { color: #00ff88; }
-    .trade.sell { color: #ff6666; }
-    label { display: block; margin-bottom: 10px; font-size: 12px; color: #aaa; }
-    input { background: #111; color: #00ff88; border: 1px solid #333; border-radius: 4px; padding: 6px 10px; width: 100%; margin-top: 4px; }
-    button { background: #00ff88; color: #000; border: none; border-radius: 6px; padding: 10px 20px; cursor: pointer; font-weight: bold; margin-top: 12px; width: 100%; }
-    button:hover { background: #00cc70; }
-    .stat { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #222; font-size: 13px; }
-    .stat span:last-child { color: #00ff88; }
-    #status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #00ff88; margin-right: 8px; animation: pulse 1.5s infinite; }
-    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#0a0a0a;color:#e0e0e0;font-family:monospace;padding:16px}
+    h1{color:#00ff88;font-size:17px}
+    .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:8px}
+    .status{display:flex;align-items:center;gap:6px;font-size:12px;padding:4px 12px;border-radius:20px;border:1px solid #333;color:#aaa}
+    .dot{width:8px;height:8px;border-radius:50%;background:#555;transition:background .3s}
+    .dot.on{background:#00ff88;animation:pulse 1.5s infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+    .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px}
+    .stat-card{background:#141414;border:1px solid #222;border-radius:10px;padding:14px}
+    .stat-label{color:#666;font-size:10px;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
+    .stat-value{font-size:18px;font-weight:bold;color:#e0e0e0}
+    .controls{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+    .btn-pause{background:#1a1a1a;color:#ffaa00;border:1px solid #ffaa00;border-radius:6px;padding:8px 16px;cursor:pointer;font-family:monospace;font-size:12px;font-weight:bold}
+    .btn-pause:hover{background:#2a2000}
+    .btn-pause.paused{color:#ff4444;border-color:#ff4444}
+    .btn-pause.paused:hover{background:#2a0000}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+    .card{background:#141414;border:1px solid #222;border-radius:10px;padding:14px}
+    .card-title{color:#00ff88;font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px}
+    .trade-list{max-height:380px;overflow-y:auto}
+    .trade-row{display:flex;align-items:center;gap:6px;padding:6px 0;border-bottom:1px solid #1a1a1a;font-size:11px}
+    .badge{padding:1px 5px;border-radius:3px;font-size:9px;font-weight:bold;flex-shrink:0}
+    .badge.BUY{background:#0a1f12;color:#00ff88;border:1px solid #00ff88}
+    .badge.SELL{background:#1f0a0a;color:#ff6666;border:1px solid #ff6666}
+    .mint{color:#888;font-size:10px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .pnl-pos{color:#00ff88;margin-left:auto;flex-shrink:0}
+    .pnl-neg{color:#ff6666;margin-left:auto;flex-shrink:0}
+    .view-link{color:#60a5fa;font-size:10px;text-decoration:none;flex-shrink:0}
+    .view-link:hover{text-decoration:underline}
+    .cfg-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
+    .cfg-label{color:#666;font-size:10px;display:block;margin-bottom:4px;text-transform:uppercase}
+    .cfg-input{background:#0d0d0d;color:#00ff88;border:1px solid #333;border-radius:6px;padding:6px 8px;width:100%;font-family:monospace;font-size:12px}
+    .save-btn{background:#00ff88;color:#000;border:none;border-radius:6px;padding:10px;width:100%;cursor:pointer;font-weight:bold;font-size:12px;font-family:monospace;transition:background .2s}
+    .save-btn:hover{background:#00cc70}
+    .pos-row{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #1a1a1a;font-size:11px}
+    .pos-card{margin-bottom:14px}
+    .error-msg{background:#1f0a0a;border:1px solid #ff4444;border-radius:6px;padding:10px;margin-bottom:14px;font-size:11px;color:#ff6666;display:none}
+    .empty-msg{color:#555;font-size:11px;padding:8px 0}
+    @media(max-width:600px){.stats{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
-  <h1><span id="status"></span>MemeRush Sniper Bot</h1>
-  <div class="grid">
-    <div class="card">
-      <h3>Live Trades</h3>
-      <div id="trades"><p style="color:#555;font-size:12px">Waiting for tokens...</p></div>
+
+<div class="header">
+  <h1>🤖 MemeRush Sniper Bot</h1>
+  <div class="status" id="status-badge">
+    <div class="dot" id="status-dot"></div>
+    <span id="status-text">Connecting...</span>
+  </div>
+</div>
+
+<!-- Error banner -->
+<div class="error-msg" id="error-banner">
+  ⚠️ Cannot connect to backend. Make sure Render service is running.
+  <a href="https://memebot-4.onrender.com/health" target="_blank" style="color:#ff9999;margin-left:8px">Check status</a>
+</div>
+
+<!-- Stats -->
+<div class="stats">
+  <div class="stat-card">
+    <div class="stat-label">Paper Balance</div>
+    <div class="stat-value" id="stat-balance" style="color:#00ff88">— SOL</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Trades</div>
+    <div class="stat-value" id="stat-trades" style="color:#60a5fa">0</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Wins / Losses</div>
+    <div class="stat-value">
+      <span id="stat-wins" style="color:#00ff88">0</span>
+      <span style="color:#444"> / </span>
+      <span id="stat-losses" style="color:#ff6666">0</span>
     </div>
-    <div class="card">
-      <h3>Stats</h3>
-      <div class="stat"><span>Total trades</span><span id="total">0</span></div>
-      <div class="stat"><span>Wins</span><span id="wins">0</span></div>
-      <div class="stat"><span>Losses</span><span id="losses">0</span></div>
-      <div class="stat"><span>Avg P&L</span><span id="avg-pnl">—</span></div>
-    </div>
-    <div class="card" style="grid-column: span 2">
-      <h3>Config</h3>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px">
-        <label>Buy Amount (SOL)<input id="buyAmount" value="0.05"/></label>
-        <label>Slippage (BPS)<input id="slippage" value="500"/></label>
-        <label>Min Liquidity (SOL)<input id="minLiquidity" value="5"/></label>
-        <label>Hold Time (ms)<input id="holdTime" value="30000"/></label>
-        <label>Take Profit Min %<input id="tpMin" value="10"/></label>
-        <label>Take Profit Max %<input id="tpMax" value="100"/></label>
-      </div>
-      <button onclick="updateConfig()">Update Config</button>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Total P&amp;L</div>
+    <div class="stat-value" id="stat-pnl">—</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Bot Status</div>
+    <div class="stat-value" id="stat-botstatus" style="color:#00ff88">Running</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Uptime</div>
+    <div class="stat-value" id="stat-uptime" style="color:#aaa">—</div>
+  </div>
+</div>
+
+<!-- Controls -->
+<div class="controls">
+  <button class="btn-pause" id="pause-btn" onclick="toggleBot()">⏸ Pause Bot</button>
+</div>
+
+<!-- Open Positions -->
+<div class="card pos-card" id="positions-card" style="display:none">
+  <div class="card-title">⏳ Open Positions</div>
+  <div id="positions-list"></div>
+</div>
+
+<!-- Main grid -->
+<div class="grid">
+  <!-- Trade Feed -->
+  <div class="card">
+    <div class="card-title">📋 Live Trade Feed</div>
+    <div class="trade-list" id="trade-list">
+      <p class="empty-msg">Waiting for trades...</p>
     </div>
   </div>
 
-  <script src="/socket.io/socket.io.js"></script>
-  <script>
-    const socket = io();
-    let total=0, wins=0, losses=0, pnlSum=0;
+  <!-- Config -->
+  <div class="card">
+    <div class="card-title">⚙️ Config</div>
+    <div class="cfg-grid">
+      <div>
+        <label class="cfg-label">Buy Amount (SOL)</label>
+        <input class="cfg-input" id="cfg-buyAmount" value="0.01">
+      </div>
+      <div>
+        <label class="cfg-label">Slippage (BPS)</label>
+        <input class="cfg-input" id="cfg-slippage" value="1000">
+      </div>
+      <div>
+        <label class="cfg-label">Hold Time (ms)</label>
+        <input class="cfg-input" id="cfg-holdTime" value="30000">
+      </div>
+      <div>
+        <label class="cfg-label">TP Min %</label>
+        <input class="cfg-input" id="cfg-tpMin" value="10">
+      </div>
+      <div>
+        <label class="cfg-label">TP Max %</label>
+        <input class="cfg-input" id="cfg-tpMax" value="100">
+      </div>
+      <div>
+        <label class="cfg-label">Min Liquidity (SOL)</label>
+        <input class="cfg-input" id="cfg-minLiquidity" value="0.001">
+      </div>
+    </div>
+    <button class="save-btn" id="save-btn" onclick="saveConfig()">Update Config</button>
 
-    socket.on('trade', data => {
-      const div = document.createElement('div');
-      div.className = `trade ${data.type.toLowerCase()}`;
-      const pnl = data.pnlPct != null ? ` | P&L: ${data.pnlPct.toFixed(1)}%` : '';
-      div.textContent = `${new Date().toLocaleTimeString()} | ${data.type} | ${data.mint?.slice(0,8)}...${pnl}`;
-      document.getElementById('trades').prepend(div);
+    <!-- Mode toggle -->
+    <div style="margin-top:14px;padding-top:14px;border-top:1px solid #222">
+      <div class="cfg-label" style="margin-bottom:8px">Trading Mode</div>
+      <div style="display:flex;gap:8px">
+        <button onclick="setMode(true)"  id="btn-paper" style="flex:1;padding:7px;border-radius:6px;border:1px solid #00ff88;background:#0a1f12;color:#00ff88;cursor:pointer;font-family:monospace;font-size:11px;font-weight:bold">📄 Paper</button>
+        <button onclick="setMode(false)" id="btn-live"  style="flex:1;padding:7px;border-radius:6px;border:1px solid #333;background:#1a1a1a;color:#666;cursor:pointer;font-family:monospace;font-size:11px;font-weight:bold">💰 Live</button>
+      </div>
+    </div>
+  </div>
+</div>
 
-      if (data.type === 'SELL' && data.pnlPct != null) {
-        total++; pnlSum += data.pnlPct;
-        if (data.pnlPct >= 0) wins++; else losses++;
-        document.getElementById('total').textContent = total;
-        document.getElementById('wins').textContent = wins;
-        document.getElementById('losses').textContent = losses;
-        document.getElementById('avg-pnl').textContent = (pnlSum/total).toFixed(1) + '%';
-      }
+<script>
+  const BACKEND = 'https://memebot-4.onrender.com';
+  let trades = [], wins = 0, losses = 0, totalPnl = 0;
+  let botActive = true, paperMode = true;
+  let connectTimeout;
+
+  // ── Socket ─────────────────────────────────────────────────────────────────
+  // Check if socket.io loaded (CDN might have failed)
+  if (typeof io === 'undefined') {
+    document.getElementById('error-banner').style.display = 'block';
+    document.getElementById('error-banner').textContent =
+      '⚠️ socket.io failed to load. Check your internet connection.';
+  }
+
+  const socket = typeof io !== 'undefined'
+    ? io(BACKEND, { transports: ['websocket', 'polling'], timeout: 10000 })
+    : null;
+
+  // Show error if can't connect in 8s
+  connectTimeout = setTimeout(() => {
+    if (!socket || !socket.connected) {
+      document.getElementById('error-banner').style.display = 'block';
+    }
+  }, 8000);
+
+  if (socket) {
+    socket.on('connect', () => {
+      clearTimeout(connectTimeout);
+      document.getElementById('error-banner').style.display = 'none';
+      document.getElementById('status-dot').classList.add('on');
+      document.getElementById('status-text').textContent = 'Live';
+      document.getElementById('status-badge').style.borderColor = '#00ff88';
+      document.getElementById('status-badge').style.color = '#00ff88';
     });
 
-    function updateConfig() {
-      fetch('/api/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          buyAmount: document.getElementById('buyAmount').value,
-          slippage: document.getElementById('slippage').value,
-          minLiquidity: document.getElementById('minLiquidity').value,
-          holdTime: document.getElementById('holdTime').value,
-          tpMin: document.getElementById('tpMin').value,
-          tpMax: document.getElementById('tpMax').value,
-        })
-      }).then(r => r.json()).then(() => alert('Config updated!'));
+    socket.on('disconnect', () => {
+      document.getElementById('status-dot').classList.remove('on');
+      document.getElementById('status-text').textContent = 'Disconnected';
+      document.getElementById('status-badge').style.borderColor = '#ff4444';
+      document.getElementById('status-badge').style.color = '#ff4444';
+    });
+
+    socket.on('trade', (data) => { addTrade(data); updateStats(); });
+
+    socket.on('botStatus', (data) => {
+      botActive = data.active;
+      updateBotBtn();
+    });
+  }
+
+  // ── Add trade row ──────────────────────────────────────────────────────────
+  function addTrade(t) {
+    trades.unshift(t);
+    if (trades.length > 100) trades.pop();
+
+    const pnl  = t.pnl_pct  ?? t.pnlPct  ?? null;
+    const sig  = t.tx_sig   ?? t.txSig   ?? null;
+    const mint = t.mint ?? '';
+
+    if (t.type === 'SELL' && pnl !== null) {
+      if (pnl >= 0) wins++; else losses++;
+      totalPnl += pnl;
     }
-  </script>
+
+    const list = document.getElementById('trade-list');
+    const empty = list.querySelector('.empty-msg');
+    if (empty) empty.remove();
+
+    const row = document.createElement('div');
+    row.className = 'trade-row';
+
+    let html = '<span class="badge ' + t.type + '">' + t.type + '</span>';
+    html += '<span class="mint">' + mint.slice(0, 14) + '...</span>';
+    if (pnl !== null) {
+      html += '<span class="' + (pnl >= 0 ? 'pnl-pos' : 'pnl-neg') + '">' +
+              (pnl >= 0 ? '+' : '') + pnl.toFixed(1) + '%</span>';
+    }
+    if (sig) {
+      html += '<a class="view-link" href="https://solscan.io/tx/' + sig +
+              '" target="_blank" rel="noreferrer">↗</a>';
+    }
+    row.innerHTML = html;
+    list.prepend(row);
+  }
+
+  // ── Stats ──────────────────────────────────────────────────────────────────
+  function updateStats() {
+    const sells = trades.filter(t => t.type === 'SELL').length;
+    document.getElementById('stat-trades').textContent = sells;
+    document.getElementById('stat-wins').textContent   = wins;
+    document.getElementById('stat-losses').textContent = losses;
+    const pnlEl = document.getElementById('stat-pnl');
+    pnlEl.textContent = (totalPnl >= 0 ? '+' : '') + totalPnl.toFixed(1) + '%';
+    pnlEl.style.color = totalPnl >= 0 ? '#00ff88' : '#ff6666';
+  }
+
+  // ── Fetch initial trades ───────────────────────────────────────────────────
+  fetch(BACKEND + '/api/trades')
+    .then(r => r.json())
+    .then(data => { if (Array.isArray(data)) { data.forEach(addTrade); updateStats(); } })
+    .catch(() => {});
+
+  // ── Poll stats every 5s ────────────────────────────────────────────────────
+  function fetchStats() {
+    fetch(BACKEND + '/api/stats')
+      .then(r => r.json())
+      .then(s => {
+        if (!s) return;
+        if (s.solBalance != null)
+          document.getElementById('stat-balance').textContent = s.solBalance.toFixed(4) + ' SOL';
+
+        const pc = document.getElementById('positions-card');
+        const pl = document.getElementById('positions-list');
+        if (s.openPositions && s.openPositions.length > 0) {
+          pc.style.display = 'block';
+          pl.innerHTML = s.openPositions.map(p =>
+            '<div class="pos-row">' +
+            '<span style="color:#aaa">' + (p.mint||'').slice(0,16) + '...</span>' +
+            '<span style="color:#60a5fa">' + Math.floor((Date.now()-p.buyTime)/1000) + 's</span>' +
+            '</div>'
+          ).join('');
+        } else {
+          pc.style.display = 'none';
+        }
+      })
+      .catch(() => {});
+
+    // Uptime from health check
+    fetch(BACKEND + '/health')
+      .then(r => r.json())
+      .then(h => {
+        if (h.uptime) {
+          const m = Math.floor(h.uptime / 60);
+          const hr = Math.floor(m / 60);
+          document.getElementById('stat-uptime').textContent =
+            hr > 0 ? hr + 'h ' + (m % 60) + 'm' : m + 'm';
+        }
+      })
+      .catch(() => {});
+  }
+
+  fetchStats();
+  setInterval(fetchStats, 5000);
+
+  // ── Bot toggle ─────────────────────────────────────────────────────────────
+  function toggleBot() {
+    fetch(BACKEND + '/api/bot/toggle', { method: 'POST' })
+      .then(r => r.json())
+      .then(d => {
+        botActive = d.status === 'running';
+        updateBotBtn();
+      })
+      .catch(() => alert('Could not reach backend'));
+  }
+
+  function updateBotBtn() {
+    const btn = document.getElementById('pause-btn');
+    const stat = document.getElementById('stat-botstatus');
+    if (botActive) {
+      btn.textContent = '⏸ Pause Bot';
+      btn.className = 'btn-pause';
+      stat.textContent = 'Running';
+      stat.style.color = '#00ff88';
+    } else {
+      btn.textContent = '▶ Resume Bot';
+      btn.className = 'btn-pause paused';
+      stat.textContent = 'Paused';
+      stat.style.color = '#ff4444';
+    }
+  }
+
+  // ── Paper / Live mode ──────────────────────────────────────────────────────
+  function setMode(isPaper) {
+    paperMode = isPaper;
+    document.getElementById('btn-paper').style.borderColor = isPaper  ? '#00ff88' : '#333';
+    document.getElementById('btn-paper').style.color       = isPaper  ? '#00ff88' : '#666';
+    document.getElementById('btn-paper').style.background  = isPaper  ? '#0a1f12' : '#1a1a1a';
+    document.getElementById('btn-live').style.borderColor  = !isPaper ? '#ffaa00' : '#333';
+    document.getElementById('btn-live').style.color        = !isPaper ? '#ffaa00' : '#666';
+    document.getElementById('btn-live').style.background   = !isPaper ? '#1f1500' : '#1a1a1a';
+
+    fetch(BACKEND + '/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paperTrading: String(isPaper) }),
+    }).catch(() => {});
+  }
+
+  // ── Save config ────────────────────────────────────────────────────────────
+  function saveConfig() {
+    const body = {
+      buyAmount:    document.getElementById('cfg-buyAmount').value,
+      slippage:     document.getElementById('cfg-slippage').value,
+      holdTime:     document.getElementById('cfg-holdTime').value,
+      tpMin:        document.getElementById('cfg-tpMin').value,
+      tpMax:        document.getElementById('cfg-tpMax').value,
+      minLiquidity: document.getElementById('cfg-minLiquidity').value,
+    };
+    const btn = document.getElementById('save-btn');
+    fetch(BACKEND + '/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    .then(r => r.json())
+    .then(() => {
+      btn.textContent = '✅ Saved!';
+      btn.style.background = '#00aa55';
+      setTimeout(() => { btn.textContent = 'Update Config'; btn.style.background = '#00ff88'; }, 2000);
+    })
+    .catch(() => { btn.textContent = '❌ Failed'; btn.style.background = '#aa0000';
+                   setTimeout(() => { btn.textContent = 'Update Config'; btn.style.background = '#00ff88'; }, 2000); });
+  }
+</script>
 </body>
 </html>
