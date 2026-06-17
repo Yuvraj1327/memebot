@@ -1,16 +1,12 @@
+// src/index.ts
+import https from 'https';
+import PQueue from 'p-queue';
+import { PublicKey } from '@solana/web3.js';
 import { TokenDetector } from './detector';
 import { PositionManager } from './positionManager';
 import { runSafetyChecks } from './safety';
 import { executeBuy, getTokenRawAmount } from './executor';
-import { PublicKey } from '@solana/web3.js';
-import PQueue from 'p-queue';
-
-
-
-
-import './dashboard';
-
-
+import { emitNewToken, isBotActive } from './dashboard';
 
 const queue = new PQueue({ concurrency: 1 });
 const detector = new TokenDetector();
@@ -19,7 +15,17 @@ const positionManager = new PositionManager();
 async function main() {
   console.log('🤖 MemeRush Bot Starting...');
 
-  detector.on('newToken', ({ mint, signature }) => {
+  detector.on('newToken', ({ mint, source, signature }) => {
+
+    // Dashboard pe naya token dikhao
+    emitNewToken(mint.toString(), source ?? 'unknown');
+
+    // Bot paused hai toh skip
+    if (!isBotActive()) {
+      console.log('⏸ Bot paused — skipping', mint.toString().slice(0, 8));
+      return;
+    }
+
     queue.add(async () => {
       console.log(`\n🔔 New token: ${mint.toString()}`);
 
@@ -37,10 +43,10 @@ async function main() {
         return;
       }
 
-      // Wait a moment for balance to settle on-chain
+      // Balance settle hone do
       await new Promise(r => setTimeout(r, 2000));
 
-      // Fetch real token amount from wallet
+      // Real token amount fetch karo
       const tokenAmount = await getTokenRawAmount(mint);
       if (tokenAmount <= 0) {
         console.warn('⚠️  Could not read token balance after buy');
@@ -64,10 +70,8 @@ async function main() {
 
 main().catch(console.error);
 
-
 // Render free tier ko jaagta rakho
-import https from 'https';
 setInterval(() => {
   https.get('https://memebot-4.onrender.com/health', () => {})
     .on('error', () => {});
-}, 10 * 60 * 1000); // har 10 minute mein ping
+}, 10 * 60 * 1000);

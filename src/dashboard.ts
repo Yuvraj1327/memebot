@@ -71,3 +71,26 @@ app.get('/', (_req, res) => {
     version: '1.0.0'
   });
 });
+
+
+
+
+
+
+// Detected tokens store karo
+const detectedTokens: any[] = [];
+
+export function emitNewToken(mint: string, source: string) {
+  const token = {
+    mint,
+    source,
+    time: Date.now(),
+  };
+  detectedTokens.unshift(token);
+  if (detectedTokens.length > 50) detectedTokens.pop();
+  io.emit('newToken', token);
+}
+
+app.get('/api/tokens', (_req, res) => {
+  res.json(detectedTokens);
+});
