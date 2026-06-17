@@ -6,8 +6,7 @@
     "start": "ts-node src/index.ts",
     "dev": "nodemon --exec ts-node src/index.ts",
     "build": "tsc",
-    "start:prod": "node dist/index.js",
-    "dashboard": "ts-node src/dashboard.ts"
+    "postinstall": "npm rebuild better-sqlite3"
   },
   "keywords": [],
   "author": "",
