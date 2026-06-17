@@ -61,3 +61,13 @@ const PORT = Number(process.env.PORT) || 3000;
 httpServer.listen(PORT, () => {
   console.log('📊 API running on port ' + PORT);
 });
+
+
+app.get('/', (_req, res) => {
+  res.json({ 
+    status: 'MemeRush Bot Running ✅', 
+    uptime: Math.floor(process.uptime()) + 's',
+    paper_mode: process.env.PAPER_TRADING === 'true',
+    version: '1.0.0'
+  });
+});
