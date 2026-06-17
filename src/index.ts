@@ -63,3 +63,11 @@ async function main() {
 }
 
 main().catch(console.error);
+
+
+// Render free tier ko jaagta rakho
+import https from 'https';
+setInterval(() => {
+  https.get('https://memebot-4.onrender.com/health', () => {})
+    .on('error', () => {});
+}, 10 * 60 * 1000); // har 10 minute mein ping
