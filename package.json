@@ -1,0 +1,40 @@
+{
+  "name": "solana-sniper",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "ts-node src/index.ts",
+    "dev": "nodemon --exec ts-node src/index.ts",
+    "build": "tsc",
+    "start:prod": "node dist/index.js",
+    "dashboard": "ts-node src/dashboard.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.4",
+    "@types/bn.js": "^5.2.0",
+    "axios": "^1.18.0",
+    "better-sqlite3": "^12.11.1",
+    "bn.js": "^5.2.3",
+    "bs58": "^6.0.0",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "p-queue": "^9.3.0",
+    "socket.io": "^4.8.3",
+    "winston": "^3.19.0",
+    "ws": "^8.21.0"
+  },
+  "description": "",
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.9.3",
+    "@types/ws": "^8.18.1",
+    "nodemon": "^3.1.14",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
+  }
+}

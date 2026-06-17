@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MemeRush Bot Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0d0d0d; color: #e0e0e0; font-family: monospace; padding: 24px; }
+    h1 { color: #00ff88; margin-bottom: 20px; font-size: 20px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px; padding: 16px; }
+    .card h3 { color: #00ff88; font-size: 13px; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 1px; }
+    .trade { padding: 6px 0; border-bottom: 1px solid #222; font-size: 12px; }
+    .trade.buy  { color: #00ff88; }
+    .trade.sell { color: #ff6666; }
+    label { display: block; margin-bottom: 10px; font-size: 12px; color: #aaa; }
+    input { background: #111; color: #00ff88; border: 1px solid #333; border-radius: 4px; padding: 6px 10px; width: 100%; margin-top: 4px; }
+    button { background: #00ff88; color: #000; border: none; border-radius: 6px; padding: 10px 20px; cursor: pointer; font-weight: bold; margin-top: 12px; width: 100%; }
+    button:hover { background: #00cc70; }
+    .stat { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #222; font-size: 13px; }
+    .stat span:last-child { color: #00ff88; }
+    #status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #00ff88; margin-right: 8px; animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+  </style>
+</head>
+<body>
+  <h1><span id="status"></span>MemeRush Sniper Bot</h1>
+  <div class="grid">
+    <div class="card">
+      <h3>Live Trades</h3>
+      <div id="trades"><p style="color:#555;font-size:12px">Waiting for tokens...</p></div>
+    </div>
+    <div class="card">
+      <h3>Stats</h3>
+      <div class="stat"><span>Total trades</span><span id="total">0</span></div>
+      <div class="stat"><span>Wins</span><span id="wins">0</span></div>
+      <div class="stat"><span>Losses</span><span id="losses">0</span></div>
+      <div class="stat"><span>Avg P&L</span><span id="avg-pnl">—</span></div>
+    </div>
+    <div class="card" style="grid-column: span 2">
+      <h3>Config</h3>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px">
+        <label>Buy Amount (SOL)<input id="buyAmount" value="0.05"/></label>
+        <label>Slippage (BPS)<input id="slippage" value="500"/></label>
+        <label>Min Liquidity (SOL)<input id="minLiquidity" value="5"/></label>
+        <label>Hold Time (ms)<input id="holdTime" value="30000"/></label>
+        <label>Take Profit Min %<input id="tpMin" value="10"/></label>
+        <label>Take Profit Max %<input id="tpMax" value="100"/></label>
+      </div>
+      <button onclick="updateConfig()">Update Config</button>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    let total=0, wins=0, losses=0, pnlSum=0;
+
+    socket.on('trade', data => {
+      const div = document.createElement('div');
+      div.className = `trade ${data.type.toLowerCase()}`;
+      const pnl = data.pnlPct != null ? ` | P&L: ${data.pnlPct.toFixed(1)}%` : '';
+      div.textContent = `${new Date().toLocaleTimeString()} | ${data.type} | ${data.mint?.slice(0,8)}...${pnl}`;
+      document.getElementById('trades').prepend(div);
+
+      if (data.type === 'SELL' && data.pnlPct != null) {
+        total++; pnlSum += data.pnlPct;
+        if (data.pnlPct >= 0) wins++; else losses++;
+        document.getElementById('total').textContent = total;
+        document.getElementById('wins').textContent = wins;
+        document.getElementById('losses').textContent = losses;
+        document.getElementById('avg-pnl').textContent = (pnlSum/total).toFixed(1) + '%';
+      }
+    });
+
+    function updateConfig() {
+      fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          buyAmount: document.getElementById('buyAmount').value,
+          slippage: document.getElementById('slippage').value,
+          minLiquidity: document.getElementById('minLiquidity').value,
+          holdTime: document.getElementById('holdTime').value,
+          tpMin: document.getElementById('tpMin').value,
+          tpMax: document.getElementById('tpMax').value,
+        })
+      }).then(r => r.json()).then(() => alert('Config updated!'));
+    }
+  </script>
+</body>
+</html>
