@@ -1,154 +1,102 @@
 // src/safety.ts
 import { PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { connection, CONFIG } from './config';
-import axios from 'axios';
 
 export interface SafetyResult {
   passed: boolean;
   reason?: string;
   liquiditySOL?: number;
-  liquidityUSD?: number;
 }
 
-// ── DexScreener check — FREE, no API key ─────────────────────────────────────
-async function getDexScreenerData(mint: string): Promise<{
-  liquidityUSD: number;
-  volume24h: number;
-  priceChange5m: number;
-  dexId: string;
-} | null> {
-  try {
-    const res = await axios.get(
-      'https://api.dexscreener.com/latest/dex/tokens/' + mint,
-      { timeout: 5000 }
-    );
-
-    const pairs = res.data?.pairs;
-    if (!pairs || pairs.length === 0) return null;
-
-    // Best pair lo — highest liquidity wala
-    const best = pairs.sort((a: any, b: any) =>
-      (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0)
-    )[0];
-
-    return {
-      liquidityUSD:  best.liquidity?.usd    || 0,
-      volume24h:     best.volume?.h24        || 0,
-      priceChange5m: best.priceChange?.m5    || 0,
-      dexId:         best.dexId             || '',
-    };
-  } catch {
-    return null; // DexScreener fail hone pe hard block nahi
-  }
-}
-
-// ── Main safety check ─────────────────────────────────────────────────────────
 export async function runSafetyChecks(
   tokenMint: PublicKey,
   poolAddress: PublicKey
 ): Promise<SafetyResult> {
   try {
 
-    // ── 1. Valid token mint check ─────────────────────────────────────────────
+    // ── 1. Verify it's actually a token mint ─────────────────────────────────
     const mintAccountInfo = await connection.getAccountInfo(tokenMint);
     if (!mintAccountInfo) {
       return { passed: false, reason: 'Mint account does not exist' };
     }
 
-    const TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
-    const TOKEN_2022    = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
-    const owner = mintAccountInfo.owner.toString();
+    // Token mints are owned by the Token Program (or Token-2022)
+    const TOKEN_PROGRAM    = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+    const TOKEN_2022       = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
+    const ownerPubkey = mintAccountInfo.owner.toString();
 
-    if (owner !== TOKEN_PROGRAM && owner !== TOKEN_2022) {
-      return { passed: false, reason: 'Not a valid token mint' };
+    if (ownerPubkey !== TOKEN_PROGRAM && ownerPubkey !== TOKEN_2022) {
+      return { passed: false, reason: `Not a token mint (owner: ${ownerPubkey.slice(0, 8)}...)` };
     }
 
+    // Mint account data is 82 bytes for SPL tokens
     if (mintAccountInfo.data.length < 82) {
-      return { passed: false, reason: 'Invalid mint data' };
+      return { passed: false, reason: 'Invalid mint account data length' };
     }
 
-    // ── 2. Basic SOL liquidity check (fast) ──────────────────────────────────
-    const poolBalance  = await connection.getBalance(poolAddress);
+    // ── 2. Check liquidity (SOL balance of pool/mint area) ───────────────────
+    const poolBalance = await connection.getBalance(poolAddress);
     const liquiditySOL = poolBalance / LAMPORTS_PER_SOL;
 
     if (liquiditySOL < CONFIG.MIN_LIQUIDITY_SOL) {
       return {
         passed: false,
-        reason: 'Low SOL liquidity: ' + liquiditySOL.toFixed(6) + ' SOL',
+        reason: `Insufficient liquidity: ${liquiditySOL.toFixed(6)} SOL < ${CONFIG.MIN_LIQUIDITY_SOL} SOL`,
       };
     }
 
-    // ── 3. DexScreener check (free, no key needed) ───────────────────────────
-    const dex = await getDexScreenerData(tokenMint.toString());
+    // ── 3. Check top holder concentration (honeypot check) ───────────────────
+    try {
+      const largestAccounts = await connection.getTokenLargestAccounts(tokenMint);
 
-    if (dex) {
-      console.log(
-        '📊 DexScreener: $' + dex.liquidityUSD.toFixed(0) +
-        ' liq | Vol: $' + dex.volume24h.toFixed(0) +
-        ' | 5m: ' + dex.priceChange5m.toFixed(1) + '%'
-      );
+      if (largestAccounts.value.length > 0) {
+        const supplyInfo = await connection.getTokenSupply(tokenMint);
+        const totalSupply = Number(supplyInfo.value.amount);
 
-      // Liquidity bahut kam — likely rug
-      if (dex.liquidityUSD > 0 && dex.liquidityUSD < 500) {
-        return {
-          passed: false,
-          reason: 'DexScreener liquidity too low: $' + dex.liquidityUSD.toFixed(0),
-        };
+        if (totalSupply > 0) {
+          const topAmount = Number(largestAccounts.value[0].amount);
+          const topHolderPct = (topAmount / totalSupply) * 100;
+
+          if (topHolderPct > 90) {
+            return {
+              passed: false,
+              reason: `Top holder owns ${topHolderPct.toFixed(1)}% — likely honeypot`,
+            };
+          }
+        }
       }
-
-      // Price already 1000% upar — too late to snipe
-      if (dex.priceChange5m > 1000) {
-        return {
-          passed: false,
-          reason: 'Already pumped ' + dex.priceChange5m.toFixed(0) + '% in 5min — too late',
-        };
-      }
-    } else {
-      // DexScreener pe nahi mila — naya token hai (pump.fun pe hai)
-      // Yeh actually GOOD hai — fresh launch
-      console.log('ℹ️  Not on DexScreener yet — fresh pump.fun launch');
+    } catch {
+      // Holder check failed — not a hard block, just warn
+      console.warn(`⚠️  Could not check holder concentration for ${tokenMint.toString().slice(0, 8)}...`);
     }
 
-    // ── 4. Freeze authority check ─────────────────────────────────────────────
+    // ── 4. Check mint authority (can devs mint infinite tokens?) ─────────────
     try {
       const mintInfo = await connection.getParsedAccountInfo(tokenMint);
-      const parsed   = (mintInfo.value?.data as any)?.parsed?.info;
+      const parsed = (mintInfo.value?.data as any)?.parsed?.info;
 
+      if (parsed?.mintAuthority) {
+        console.warn(`⚠️  Mint authority not revoked on ${tokenMint.toString().slice(0, 8)}...`);
+        // Not a hard block — many legit tokens haven't revoked yet at launch
+      }
+
+      // Freeze authority is more dangerous
       if (parsed?.freezeAuthority) {
         return {
           passed: false,
-          reason: 'Freeze authority active — dev can freeze tokens',
+          reason: 'Freeze authority active — dev can freeze your tokens',
         };
       }
-
-      if (parsed?.mintAuthority) {
-        console.warn('⚠️  Mint authority not revoked');
-      }
-    } catch { }
-
-    // ── 5. Top holder check ───────────────────────────────────────────────────
-    try {
-      const largest    = await connection.getTokenLargestAccounts(tokenMint);
-      const supplyInfo = await connection.getTokenSupply(tokenMint);
-      const total      = Number(supplyInfo.value.amount);
-
-      if (total > 0 && largest.value.length > 0) {
-        const topPct = (Number(largest.value[0].amount) / total) * 100;
-        if (topPct > 90) {
-          return {
-            passed: false,
-            reason: 'Top holder owns ' + topPct.toFixed(1) + '% — honeypot',
-          };
-        }
-      }
-    } catch { }
+    } catch {
+      // Parse failed — skip this check
+    }
 
     return { passed: true, liquiditySOL };
 
   } catch (err: any) {
     return {
       passed: false,
-      reason: 'Safety error: ' + (err?.message || err),
+      reason: `Safety check error: ${err?.message || err}`,
     };
   }
 }
