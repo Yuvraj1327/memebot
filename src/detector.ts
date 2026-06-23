@@ -1,160 +1,138 @@
 // src/detector.ts
-import { Connection, PublicKey } from '@solana/web3.js';
+import { PublicKey, Connection } from '@solana/web3.js';
 import { EventEmitter } from 'events';
 import { connection } from './config';
+import axios from 'axios';
 
-// ── Program IDs ──────────────────────────────────────────────────────────────
-const PUMP_FUN_PROGRAM    = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
-const RAYDIUM_AMM         = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
-const RAYDIUM_CPMM        = new PublicKey('CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C');
+const PUMP_FUN_PROGRAM = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
 
-// Known stablecoins / non-memecoins to ignore
 const BLACKLIST = new Set([
-  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
-  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
-  'So11111111111111111111111111111111111111112',    // wSOL
-  'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So', // mSOL
-  'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', // BONK
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',
+  'So11111111111111111111111111111111111111112',
+  'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So',
 ]);
 
 export class TokenDetector extends EventEmitter {
-  private subIds: number[]   = [];
-  private seen = new Set<string>(); // dedup cache
-  private seenTTL = 60_000;        // forget after 60s
+  private seen = new Set<string>();
+  private running = false;
+  private lastSignature: string | null = null;
+  private tradeCount = 0;
+  private readonly MAX_TRADES = parseInt(process.env.MAX_TRADES || '20');
 
-  async start() {
-    console.log('🔍 Starting token detector...');
-
-    // ── 1. Pump.fun new token launches ───────────────────────────────────────
-    const pumpSub = connection.onLogs(
-      PUMP_FUN_PROGRAM,
-      async (logInfo) => {
-        if (logInfo.err) return;
-
-        const isCreate = logInfo.logs.some(l =>
-          l.includes('Instruction: Create') ||
-          l.includes('Program log: create')
-        );
-        if (!isCreate) return;
-
-        const mint = await this.extractMintFromTx(logInfo.signature);
-        if (mint) this.emitOnce(mint, logInfo.signature, 'pump.fun');
-      },
-      'confirmed'
-    );
-
-    // ── 2. Raydium AMM new pool (token "graduates" from pump.fun or new launch)
-    const raySub = connection.onLogs(
-      RAYDIUM_AMM,
-      async (logInfo) => {
-        if (logInfo.err) return;
-
-        const isNewPool = logInfo.logs.some(l =>
-          l.includes('initialize2') ||
-          l.includes('Instruction: Initialize')
-        );
-        if (!isNewPool) return;
-
-        const mint = await this.extractMintFromTx(logInfo.signature);
-        if (mint) this.emitOnce(mint, logInfo.signature, 'raydium-amm');
-      },
-      'confirmed'
-    );
-
-    // ── 3. Raydium CPMM (newer pool type) ────────────────────────────────────
-    const cpmmSub = connection.onLogs(
-      RAYDIUM_CPMM,
-      async (logInfo) => {
-        if (logInfo.err) return;
-
-        const isNewPool = logInfo.logs.some(l =>
-          l.includes('initialize') ||
-          l.includes('CreatePool')
-        );
-        if (!isNewPool) return;
-
-        const mint = await this.extractMintFromTx(logInfo.signature);
-        if (mint) this.emitOnce(mint, logInfo.signature, 'raydium-cpmm');
-      },
-      'confirmed'
-    );
-
-    this.subIds = [pumpSub, raySub, cpmmSub];
-    console.log('✅ Watching pump.fun + Raydium AMM + Raydium CPMM');
+  incrementTrade() {
+    this.tradeCount++;
+    console.log('📊 Trade: ' + this.tradeCount + '/' + this.MAX_TRADES);
   }
 
-  // ── Emit each mint only once per 60s ─────────────────────────────────────
+  canTrade(): boolean {
+    return this.tradeCount < this.MAX_TRADES;
+  }
+
+  async start() {
+    console.log('🔍 Starting detector (HTTP polling mode)...');
+    console.log('📊 Max trades: ' + this.MAX_TRADES);
+    this.running = true;
+    this.poll();
+  }
+
+  private async poll() {
+    while (this.running) {
+      try {
+        await this.checkNewTokens();
+      } catch (err: any) {
+        console.warn('⚠️ Poll error:', err?.message);
+      }
+      // 10 second interval — Helius quota safe
+      await new Promise(r => setTimeout(r, 10_000));
+    }
+  }
+
+  private async checkNewTokens() {
+    // Get recent transactions from pump.fun program
+    const options: any = {
+      limit: 5,
+      commitment: 'confirmed',
+    };
+
+    if (this.lastSignature) {
+      options.until = this.lastSignature;
+    }
+
+    const sigs = await connection.getSignaturesForAddress(
+      PUMP_FUN_PROGRAM,
+      options
+    );
+
+    if (!sigs || sigs.length === 0) return;
+
+    // Save latest signature for next poll
+    if (!this.lastSignature) {
+      this.lastSignature = sigs[0].signature;
+      console.log('📍 Starting from signature: ' + sigs[0].signature.slice(0, 16));
+      return; // First run — just save position
+    }
+
+    this.lastSignature = sigs[0].signature;
+
+    // Process each new transaction
+    for (const sig of sigs.reverse()) {
+      if (sig.err) continue;
+
+      await new Promise(r => setTimeout(r, 500)); // small delay
+
+      const mint = await this.extractMintFromTx(sig.signature);
+      if (mint) {
+        this.emitOnce(mint, sig.signature, 'pump.fun');
+      }
+    }
+  }
+
   private emitOnce(mint: PublicKey, signature: string, source: string) {
     const key = mint.toString();
-
-    // Skip blacklisted tokens
     if (BLACKLIST.has(key)) return;
-
-    // Skip duplicates
     if (this.seen.has(key)) return;
-    this.seen.add(key);
-    setTimeout(() => this.seen.delete(key), this.seenTTL);
 
-    console.log(`🚨 [${source}] New token: ${key}`);
+    this.seen.add(key);
+    setTimeout(() => this.seen.delete(key), 120_000);
+
+    console.log('🚨 [' + source + '] New token: ' + key.slice(0, 16) + '...');
     this.emit('newToken', { mint, signature, source });
   }
 
-  // ── Pull the token mint from transaction post-balances ───────────────────
   private async extractMintFromTx(signature: string): Promise<PublicKey | null> {
-  try {
-    // Add small delay — tx may not be fully confirmed yet
-    await new Promise(r => setTimeout(r, 800));
+    try {
+      const tx = await connection.getParsedTransaction(signature, {
+        maxSupportedTransactionVersion: 0,
+        commitment: 'confirmed',
+      });
 
-    const tx = await connection.getParsedTransaction(signature, {
-      maxSupportedTransactionVersion: 0,
-      commitment: 'confirmed',
-    });
+      if (!tx?.meta?.postTokenBalances?.length) return null;
 
-    if (!tx?.meta?.postTokenBalances?.length) return null;
+      const TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+      const TOKEN_2022    = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 
-    const TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
-    const TOKEN_2022    = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
+      for (const bal of tx.meta.postTokenBalances) {
+        const mint = bal.mint;
+        if (BLACKLIST.has(mint)) continue;
+        if (!bal.uiTokenAmount.uiAmount && bal.uiTokenAmount.uiAmount !== 0) continue;
 
-    for (const bal of tx.meta.postTokenBalances) {
-      const mint = bal.mint;
-
-      // Skip blacklisted
-      if (BLACKLIST.has(mint)) continue;
-
-      // Must have some token amount
-      if (!bal.uiTokenAmount.uiAmount && bal.uiTokenAmount.uiAmount !== 0) continue;
-
-      // Verify the mint account is actually owned by Token Program
-      try {
-        const mintPubkey = new PublicKey(mint);
-        const info = await connection.getAccountInfo(mintPubkey);
-        if (!info) continue;
-
-        const owner = info.owner.toString();
-        if (owner !== TOKEN_PROGRAM && owner !== TOKEN_2022) continue;
-        if (info.data.length < 82) continue;
-
-        return mintPubkey;
-      } catch {
-        continue;
+        try {
+          const mintPubkey = new PublicKey(mint);
+          const info = await connection.getAccountInfo(mintPubkey);
+          if (!info) continue;
+          const owner = info.owner.toString();
+          if (owner !== TOKEN_PROGRAM && owner !== TOKEN_2022) continue;
+          if (info.data.length < 82) continue;
+          return mintPubkey;
+        } catch { continue; }
       }
-    }
-  } catch {
-    // silently skip
+    } catch { }
+    return null;
   }
-  return null;
-}
 
   stop() {
-    this.subIds.forEach(id => {
-      try { connection.removeOnLogsListener(id); } catch {}
-    });
-    this.subIds = [];
+    this.running = false;
     console.log('🛑 Detector stopped');
   }
 }
-
-
-
-
-

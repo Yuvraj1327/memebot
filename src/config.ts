@@ -3,10 +3,14 @@ import bs58 from 'bs58';
 import dotenv from 'dotenv';
 dotenv.config();
 
+
+
 export const connection = new Connection(process.env.RPC_URL!, {
   commitment: 'confirmed',
-  wsEndpoint: process.env.WSS_URL!,
+  // wsEndpoint line HATAO — WebSocket use nahi karenge
 });
+
+
 
 export const wallet = Keypair.fromSecretKey(
   bs58.decode(process.env.PRIVATE_KEY!)
@@ -23,3 +27,5 @@ export const CONFIG = {
   MIN_LIQUIDITY_SOL:     parseFloat(process.env.MIN_LIQUIDITY_SOL      || '0.001'),
   PRIORITY_FEE_LAMPORTS: parseInt(process.env.PRIORITY_FEE_LAMPORTS   || '1000000'),
 };
+
+
