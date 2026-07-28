@@ -26,6 +26,12 @@ export const CONFIG = {
   SLIPPAGE_BPS:          parseInt(process.env.SLIPPAGE_BPS             || '1000'),
   MIN_LIQUIDITY_SOL:     parseFloat(process.env.MIN_LIQUIDITY_SOL      || '0.001'),
   PRIORITY_FEE_LAMPORTS: parseInt(process.env.PRIORITY_FEE_LAMPORTS   || '1000000'),
+
+  // ── Skip-buy strategy / daily limit / $ sizing (new) ──────────────────────
+  // All four are also stored in the settings DB (settingsStore.ts) and
+  // loaded over these env defaults at boot via loadPersistedSettings().
+  skipCount:          parseInt(process.env.SKIP_COUNT           || '3'),     // skip N tokens, then buy
+  dailyTradeLimit:    parseInt(process.env.DAILY_TRADE_LIMIT    || '100'),   // max successful BUYs/day
+  buyAmountUSD:        parseFloat(process.env.BUY_AMOUNT_USD     || '1'),     // fixed $ size per buy
+  autoResumeNextDay:  (process.env.AUTO_RESUME_NEXT_DAY ?? 'true') === 'true',
 };
-
-

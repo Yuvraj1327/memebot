@@ -5,6 +5,7 @@ import {
 } from '@solana/web3.js';
 import axios from 'axios';
 import { connection, wallet, CONFIG } from './config';
+import { logTrade } from './logger';
 
 // ── Paper Trading State ───────────────────────────────────────────────────────
 const PAPER_MODE = process.env.PAPER_TRADING === 'true';
@@ -71,6 +72,38 @@ async function getOrSimulatePrice(tokenMint: PublicKey): Promise<number> {
   return simulated;
 }
 
+// ── SOL/USD price + $-based sizing ────────────────────────────────────────────
+// Fixed Buy Amount is configured in USD (CONFIG.buyAmountUSD). We convert to
+// SOL from the *latest* price on every buy — never a hardcoded SOL amount.
+const SOL_MINT = 'So11111111111111111111111111111111111111112';
+const SOL_PRICE_CACHE_MS = 30_000;
+let cachedSolPrice: { price: number; ts: number } | null = null;
+
+export async function getSolUsdPrice(): Promise<number> {
+  if (cachedSolPrice && Date.now() - cachedSolPrice.ts < SOL_PRICE_CACHE_MS) {
+    return cachedSolPrice.price;
+  }
+  try {
+    const res = await axios.get(`https://api.jup.ag/price/v2?ids=${SOL_MINT}`, { timeout: 5000 });
+    const price = res.data?.data?.[SOL_MINT]?.price;
+    if (price > 0) {
+      cachedSolPrice = { price, ts: Date.now() };
+      return price;
+    }
+  } catch {
+    // fall through to cache/fallback below
+  }
+  if (cachedSolPrice) return cachedSolPrice.price; // last known good price
+  console.warn('⚠️  Could not fetch live SOL/USD price — using fallback $150 for this buy');
+  return 150;
+}
+
+/** Converts a fixed USD buy amount into SOL using the latest SOL/USD price. */
+export async function getSolAmountForUsd(usdAmount: number): Promise<number> {
+  const solPrice = await getSolUsdPrice();
+  return usdAmount / solPrice;
+}
+
 // ── Real balance helpers (still useful for stats) ─────────────────────────────
 export async function getWalletSOLBalance(): Promise<number> {
   if (PAPER_MODE) return paperState.solBalance;
@@ -94,11 +127,14 @@ export async function getTokenRawAmount(tokenMint: PublicKey): Promise<number> {
 // ── PAPER BUY ─────────────────────────────────────────────────────────────────
 async function paperBuy(
   tokenMint: PublicKey
-): Promise<{ success: boolean; txSig?: string; entryPrice?: number }> {
+): Promise<{ success: boolean; txSig?: string; entryPrice?: number; solSpent?: number }> {
   const mintStr = tokenMint.toString();
 
-  if (paperState.solBalance < CONFIG.BUY_AMOUNT_SOL + 0.002) {
-    paperLog(`❌ Insufficient paper SOL: ${paperState.solBalance.toFixed(4)}`);
+  // Fixed $ buy amount, converted from the live SOL price — never hardcoded SOL.
+  const solIn = await getSolAmountForUsd(CONFIG.buyAmountUSD);
+
+  if (paperState.solBalance < solIn + 0.002) {
+    paperLog(`❌ Insufficient paper SOL: ${paperState.solBalance.toFixed(4)} (need ~${(solIn + 0.002).toFixed(4)})`);
     return { success: false };
   }
 
@@ -106,18 +142,17 @@ async function paperBuy(
 
   // Simulate token amount received
   // pump.fun: ~1B total supply, bonding curve math simplified
-  const solIn        = CONFIG.BUY_AMOUNT_SOL;
   const tokenAmount  = entryPrice > 0
     ? (solIn * 160) / entryPrice   // rough approximation
     : solIn * 1_000_000_000 * 0.01; // fallback: 1% of 1B supply
 
   // Deduct SOL
-  paperState.solBalance -= (CONFIG.BUY_AMOUNT_SOL + 0.002); // +0.002 for fees
+  paperState.solBalance -= (solIn + 0.002); // +0.002 for fees
 
   // Record position
   paperState.positions.set(mintStr, {
     mint: mintStr,
-    solSpent: CONFIG.BUY_AMOUNT_SOL,
+    solSpent: solIn,
     tokenAmount,
     entryPrice,
     buyTime: Date.now(),
@@ -126,12 +161,15 @@ async function paperBuy(
   const fakeSig = `PAPER_BUY_${mintStr.slice(0, 8)}_${Date.now()}`;
 
   paperLog(`✅ Bought ${mintStr.slice(0, 8)}...`);
-  paperLog(`   SOL spent  : ${CONFIG.BUY_AMOUNT_SOL} SOL`);
+  paperLog(`   Buy amount : $${CONFIG.buyAmountUSD} ≈ ${solIn.toFixed(6)} SOL`);
   paperLog(`   Entry price: $${entryPrice.toExponential(4)}`);
   paperLog(`   Tokens got : ${tokenAmount.toLocaleString()}`);
   paperLog(`   Paper bal  : ${paperState.solBalance.toFixed(4)} SOL`);
 
-  return { success: true, txSig: fakeSig, entryPrice };
+  // Transaction logging (trades table was previously never written to)
+  logTrade({ mint: mintStr, type: 'BUY', price: entryPrice, amount: tokenAmount, txSig: fakeSig });
+
+  return { success: true, txSig: fakeSig, entryPrice, solSpent: solIn };
 }
 
 // ── PAPER SELL ────────────────────────────────────────────────────────────────
@@ -147,8 +185,10 @@ async function paperSell(
     return { success: false };
   }
 
-  // Calculate P&L
-  const solReceived = pos.tokenAmount * exitPrice / 160; // reverse of buy calc
+  // Calculate P&L — reverse the same rate this position was bought at
+  // (tokenAmount = solSpent * 160 / entryPrice  =>  solPerToken = entryPrice / 160)
+  const solPerToken = pos.entryPrice > 0 ? pos.entryPrice / 160 : 0;
+  const solReceived = pos.tokenAmount * (exitPrice > 0 ? exitPrice / 160 : solPerToken);
   const pnlSol      = solReceived - pos.solSpent;
   const pnlPct      = (pnlSol / pos.solSpent) * 100;
   const holdSeconds = ((Date.now() - pos.buyTime) / 1000).toFixed(0);
@@ -183,6 +223,10 @@ async function paperSell(
   if (paperState.trades.length % 5 === 0) printPaperStats();
 
   const fakeSig = `PAPER_SELL_${mintStr.slice(0, 8)}_${Date.now()}`;
+
+  // Transaction logging (trades table was previously never written to)
+  logTrade({ mint: mintStr, type: 'SELL', price: exitPrice, amount: pos.tokenAmount, pnlPct, txSig: fakeSig });
+
   return { success: true, txSig: fakeSig };
 }
 
@@ -190,7 +234,7 @@ async function paperSell(
 export async function executeBuy(
   tokenMint: PublicKey,
   _poolAddress: PublicKey
-): Promise<{ success: boolean; txSig?: string; entryPrice?: number }> {
+): Promise<{ success: boolean; txSig?: string; entryPrice?: number; solSpent?: number }> {
   if (PAPER_MODE) {
     paperLog(`🛒 Paper buying ${tokenMint.toString().slice(0, 8)}...`);
     return paperBuy(tokenMint);
@@ -218,7 +262,9 @@ export async function executeBuy(
     );
     const userTokenAcct = await getAssociatedTokenAddress(tokenMint, wallet.publicKey);
 
-    const amountLamports = Math.floor(CONFIG.BUY_AMOUNT_SOL * LAMPORTS_PER_SOL);
+    // Fixed $ buy amount, converted from the live SOL price — never hardcoded SOL.
+    const solAmount = await getSolAmountForUsd(CONFIG.buyAmountUSD);
+    const amountLamports = Math.floor(solAmount * LAMPORTS_PER_SOL);
     const ixs: any[]    = [];
 
     const ataInfo = await connection.getAccountInfo(userTokenAcct);
@@ -271,9 +317,14 @@ export async function executeBuy(
     await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
 
     console.log(`✅ Buy confirmed: ${sig}`);
+    console.log(`   Buy amount : $${CONFIG.buyAmountUSD} ≈ ${solAmount.toFixed(6)} SOL`);
     await new Promise(r => setTimeout(r, 2000));
     const entryPrice = await getTokenPrice(tokenMint);
-    return { success: true, txSig: sig, entryPrice: entryPrice || 0.000000001 };
+    const resolvedEntry = entryPrice || 0.000000001;
+
+    logTrade({ mint: tokenMint.toString(), type: 'BUY', price: resolvedEntry, amount: solAmount, txSig: sig });
+
+    return { success: true, txSig: sig, entryPrice: resolvedEntry, solSpent: solAmount };
 
   } catch (err: any) {
     console.error('❌ Buy failed:', err?.message ?? err);
@@ -284,7 +335,7 @@ export async function executeBuy(
 // ── PUBLIC: executeSell ───────────────────────────────────────────────────────
 export async function executeSell(
   tokenMint: PublicKey,
-  _hint?: number
+  amountOverride?: number
 ): Promise<{ success: boolean; txSig?: string }> {
   if (PAPER_MODE) {
     paperLog(`💰 Paper selling ${tokenMint.toString().slice(0, 8)}...`);
@@ -292,8 +343,94 @@ export async function executeSell(
     return paperSell(tokenMint, exitPrice);
   }
 
-  // real sell logic here (same as before)
-  return { success: false };
+  // Real sells are gated behind an explicit opt-in. The instruction discriminator
+  // below is the commonly-published "sell" sighash for the pump.fun program, but
+  // it (and the account list) should be re-verified against the current on-chain
+  // IDL before trading real funds — programs get upgraded.
+  if (process.env.ENABLE_REAL_TRADING !== 'true') {
+    console.warn('⚠️  Real trading disabled (set ENABLE_REAL_TRADING=true to enable) — sell skipped');
+    return { success: false };
+  }
+
+  try {
+    const { PublicKey: PK, VersionedTransaction, TransactionMessage,
+            TransactionInstruction, SystemProgram,
+            ComputeBudgetProgram } = await import('@solana/web3.js');
+    const { getAssociatedTokenAddress, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } =
+      await import('@solana/spl-token');
+
+    const PUMP_FUN_PROGRAM  = new PK('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+    const PUMP_FUN_FEE_ACCT = new PK('CebN5WGQ4jvEPvsVU4EoHEpgznyQHeSSyV5tU17KZyz9');
+    const GLOBAL_STATE      = new PK('4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5zP9QkMsA87B9fh');
+    const EVENT_AUTH        = new PK('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp1F1');
+
+    const [bondingCurve] = PK.findProgramAddressSync(
+      [Buffer.from('bonding-curve'), tokenMint.toBuffer()], PUMP_FUN_PROGRAM
+    );
+    const [assocBondCurve] = PK.findProgramAddressSync(
+      [bondingCurve.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), tokenMint.toBuffer()],
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
+    const userTokenAcct = await getAssociatedTokenAddress(tokenMint, wallet.publicKey);
+
+    const rawAmount = amountOverride ?? await getTokenRawAmount(tokenMint);
+    if (!rawAmount || rawAmount <= 0) {
+      console.warn('⚠️  No token balance to sell');
+      return { success: false };
+    }
+
+    const disc = Buffer.from([51, 230, 133, 164, 1, 127, 131, 173]); // "sell" — verify vs current IDL
+    const data = Buffer.alloc(24);
+    disc.copy(data, 0);
+    data.writeBigUInt64LE(BigInt(Math.floor(rawAmount)), 8); // token amount to sell
+    data.writeBigUInt64LE(BigInt(0), 16);                     // min SOL out — tighten this for production slippage protection
+
+    const ix = new TransactionInstruction({
+      programId: PUMP_FUN_PROGRAM,
+      keys: [
+        { pubkey: GLOBAL_STATE,       isSigner: false, isWritable: false },
+        { pubkey: PUMP_FUN_FEE_ACCT,  isSigner: false, isWritable: true  },
+        { pubkey: tokenMint,          isSigner: false, isWritable: false },
+        { pubkey: bondingCurve,       isSigner: false, isWritable: true  },
+        { pubkey: assocBondCurve,     isSigner: false, isWritable: true  },
+        { pubkey: userTokenAcct,      isSigner: false, isWritable: true  },
+        { pubkey: wallet.publicKey,   isSigner: true,  isWritable: true  },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: TOKEN_PROGRAM_ID,   isSigner: false, isWritable: false },
+        { pubkey: EVENT_AUTH,         isSigner: false, isWritable: false },
+        { pubkey: PUMP_FUN_PROGRAM,   isSigner: false, isWritable: false },
+      ],
+      data,
+    });
+
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+    const msg = new TransactionMessage({
+      payerKey: wallet.publicKey,
+      recentBlockhash: blockhash,
+      instructions: [
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: CONFIG.PRIORITY_FEE_LAMPORTS }),
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+        ix,
+      ],
+    }).compileToV0Message();
+
+    const tx = new VersionedTransaction(msg);
+    tx.sign([wallet]);
+
+    const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
+    await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
+
+    console.log(`✅ Sell confirmed: ${sig}`);
+
+    const exitPrice = await getTokenPrice(tokenMint);
+    logTrade({ mint: tokenMint.toString(), type: 'SELL', price: exitPrice || 0, amount: rawAmount, txSig: sig });
+
+    return { success: true, txSig: sig };
+
+  } catch (err: any) {
+    console.error('❌ Sell failed:', err?.message ?? err);
+    return { success: false };
+  }
 }
 
 // ── Export paper stats (for dashboard) ───────────────────────────────────────

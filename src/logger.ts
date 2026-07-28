@@ -18,8 +18,9 @@ export const logger = winston.createLogger({
   ],
 });
 
-// SQLite trade history
-const db = new Database(path.join('data', 'trades.db'));
+// SQLite trade history — exported so other modules (settingsStore, riskManager,
+// walletAuth) can share this same connection/file instead of opening their own.
+export const db = new Database(path.join('data', 'trades.db'));
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS trades (

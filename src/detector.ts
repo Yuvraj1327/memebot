@@ -30,6 +30,10 @@ export class TokenDetector extends EventEmitter {
   }
 
   async start() {
+    if (this.running) {
+      console.log('⚠️  Detector already running — ignoring duplicate start()');
+      return;
+    }
     console.log('🔍 Starting detector (HTTP polling mode)...');
     console.log('📊 Max trades: ' + this.MAX_TRADES);
     this.running = true;

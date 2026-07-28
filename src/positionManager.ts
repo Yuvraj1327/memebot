@@ -2,6 +2,8 @@
 import { PublicKey } from '@solana/web3.js';
 import { getTokenPrice, executeSell, getTokenRawAmount } from './executor';
 import { CONFIG } from './config';
+import { emitTrade } from './dashboard';
+import { recordClosedTrade } from './riskmanager';
 
 interface Position {
   mint: PublicKey;
@@ -122,6 +124,15 @@ export async function openPosition(
   console.log(`   Amount   : ${tokenAmount.toLocaleString()} tokens`);
   console.log(`   Strategy : Hold 30s normal / 45s if momentum\n`);
 
+  // Real-time event for the dashboard/WebSocket clients
+  emitTrade('positionOpened', {
+    mint: key,
+    entryPrice: safeEntry,
+    tokenAmount,
+    txSig,
+    time: Date.now(),
+  });
+
   startMonitoring(mint);
 }
 
@@ -200,26 +211,77 @@ async function closePosition(mint: PublicKey, exitPrice: number, pricePct: numbe
   const realAmount = await getTokenRawAmount(mint);
   const sellAmount = realAmount > 0 ? realAmount : pos.tokenAmount;
 
-  const result = await executeSell(mint, sellAmount);
+  let result = await executeSell(mint, sellAmount);
 
   if (result.success) {
     console.log(`✅ Sell confirmed: ${result.txSig}`);
-    positions.delete(key);
   } else {
     // Retry once after 3 seconds
     console.error(`❌ Sell failed — retrying in 3s...`);
     await new Promise(r => setTimeout(r, 3000));
 
-    const retry = await executeSell(mint, sellAmount);
-    if (retry.success) {
-      console.log(`✅ Sell confirmed (retry): ${retry.txSig}`);
+    result = await executeSell(mint, sellAmount);
+    if (result.success) {
+      console.log(`✅ Sell confirmed (retry): ${result.txSig}`);
     } else {
       console.error(`❌ Sell failed after retry — manual intervention needed!`);
       console.error(`   Token: ${key}`);
       console.error(`   Check your wallet on: https://solscan.io/account/${key}`);
     }
-    positions.delete(key);
   }
+
+  // Risk-manager bookkeeping + real-time event (position leaves active tracking
+  // either way — a failed sell still needs manual follow-up, tracked in logs above)
+  const pnlSolEstimate = (CONFIG.BUY_AMOUNT_SOL * pricePct) / 100;
+  recordClosedTrade(pnlSolEstimate);
+
+  emitTrade('positionClosed', {
+    mint: key,
+    entryPrice: pos.entryPrice,
+    exitPrice,
+    pricePct,
+    pnlSolEstimate,
+    holdSec,
+    txSig: result.txSig,
+    success: result.success,
+    time: Date.now(),
+  });
+
+  positions.delete(key);
+}
+
+// ── Standalone accessors (used by dashboard for Portfolio / Emergency Sell) ──
+export function getOpenPositions() {
+  return Array.from(positions.values()).map(p => ({
+    mint:         p.mint.toString(),
+    entryPrice:   p.entryPrice,
+    buyTime:      p.buyTime,
+    tokenAmount:  p.tokenAmount,
+    highestPrice: p.highestPrice,
+    elapsedMs:    Date.now() - p.buyTime,
+  }));
+}
+
+export function getPortfolioSummary() {
+  const open = getOpenPositions();
+  return { openPositions: open, openCount: open.length };
+}
+
+/** Force-closes every open position right now, ignoring the normal exit rules. */
+export async function closeAllPositions(reason = 'Emergency sell') {
+  const mints = Array.from(positions.keys());
+  console.log(`\n🚨 EMERGENCY SELL — closing ${mints.length} position(s): ${reason}`);
+
+  const closed: string[] = [];
+  for (const key of mints) {
+    const pos = positions.get(key);
+    if (!pos) continue;
+    const currentPrice = (await getTokenPrice(pos.mint).catch(() => 0)) || pos.entryPrice;
+    const pricePct = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
+    await closePosition(pos.mint, currentPrice, pricePct);
+    closed.push(key);
+  }
+  return closed;
 }
 
 // ── Exports ───────────────────────────────────────────────────────────────────
