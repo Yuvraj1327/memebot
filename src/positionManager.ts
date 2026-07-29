@@ -17,6 +17,7 @@ interface Position {
 }
 
 const positions = new Map<string, Position>();
+const monitorIntervals = new Map<string, NodeJS.Timeout>();
 
 // ── Exit decision ─────────────────────────────────────────────────────────────
 // Per the current strategy spec: BUY -> wait the configured Hold Time -> SELL,
@@ -113,6 +114,7 @@ function startMonitoring(mint: PublicKey) {
       const pos = positions.get(key);
       if (!pos) {
         clearInterval(intervalId);
+        monitorIntervals.delete(key);
         return;
       }
 
@@ -144,6 +146,7 @@ function startMonitoring(mint: PublicKey) {
       if (exit) {
         closing = true;
         clearInterval(intervalId);
+        monitorIntervals.delete(key);
         console.log(`\n${reason}`);
         await closePosition(mint, currentPrice, pricePct);
       }
@@ -152,6 +155,8 @@ function startMonitoring(mint: PublicKey) {
       // Deliberately swallow — a monitoring hiccup should never take down the bot.
     }
   }, 2000); // poll every 2 seconds
+
+  monitorIntervals.set(key, intervalId);
 }
 
 // ── Close a position ──────────────────────────────────────────────────────────
@@ -218,6 +223,9 @@ async function closePosition(mint: PublicKey, exitPrice: number, pricePct: numbe
     time: Date.now(),
   });
 
+  const lingeringInterval = monitorIntervals.get(key);
+  if (lingeringInterval) { clearInterval(lingeringInterval); monitorIntervals.delete(key); }
+
   positions.delete(key);
 }
 
@@ -231,6 +239,35 @@ export function getOpenPositions() {
     highestPrice: p.highestPrice,
     elapsedMs:    Date.now() - p.buyTime,
   }));
+}
+
+/**
+ * Hard stop: clears every currently-running position-monitor interval
+ * immediately. No further automatic SELLs will fire for any open position
+ * until resumeMonitoringForOpenPositions() is called (i.e. Start Bot is
+ * pressed again). Position data itself is left untouched — nothing is
+ * closed or lost, monitoring just pauses.
+ */
+export function stopAllMonitoring(): void {
+  const count = monitorIntervals.size;
+  for (const id of monitorIntervals.values()) clearInterval(id);
+  monitorIntervals.clear();
+  if (count > 0) {
+    console.log(`⏹ Position monitoring halted for ${count} open position(s) — no automatic sells will occur until Start Bot is pressed again`);
+  }
+}
+
+/**
+ * Re-attaches a monitor loop to every open position that doesn't currently
+ * have one running — i.e. anything left frozen by a prior stopAllMonitoring().
+ * Safe to call even when nothing needs resuming.
+ */
+export function resumeMonitoringForOpenPositions(): void {
+  for (const [key, pos] of positions) {
+    if (!monitorIntervals.has(key)) {
+      startMonitoring(pos.mint);
+    }
+  }
 }
 
 export function getOpenPositionCount(): number {

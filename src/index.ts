@@ -9,6 +9,8 @@ import {
   closeAllPositions,
   getPortfolioSummary,
   getOpenPositionCount,
+  stopAllMonitoring,
+  resumeMonitoringForOpenPositions,
 } from './positionManager';
 import { runSafetyChecks } from './safety';
 import { executeBuy, getTokenRawAmount } from './executor';
@@ -46,8 +48,16 @@ const positionManager = new PositionManager();
 // Hand bot lifecycle + portfolio access to the dashboard so its API routes
 // (start/stop/emergency-sell/portfolio) can actually control the running bot.
 setBotControls({
-  start: () => detector.start(),
-  stop: () => detector.stop(),
+  start: async () => {
+    await detector.start();
+    resumeMonitoringForOpenPositions(); // pick back up any positions frozen by a prior Stop
+  },
+  stop: () => {
+    detector.stop();       // stop scanning / new-token detection immediately
+    stopAllMonitoring();   // hard stop: clears every active sell-timer interval —
+                            // open positions are left exactly as-is, un-monitored,
+                            // until Start Bot is pressed again (per current spec).
+  },
   emergencySell: () => closeAllPositions('Manual emergency sell via API'),
   getPortfolio: () => getPortfolioSummary(),
   getOpenPositionCount: () => getOpenPositionCount(),
@@ -153,8 +163,17 @@ async function main() {
     });
   });
 
-  await detector.start();
-  console.log('✅ Bot is live and listening...');
+  // Fix for "bot auto-restarts a few seconds after Stop": this used to call
+  // detector.start() unconditionally on every boot. isBotActive() now reflects
+  // the PERSISTED run-state (see dashboard.ts/riskManager.ts), not a hardcoded
+  // default — so a restart resumes whatever the user last actually chose,
+  // instead of always coming back up running.
+  if (isBotActive()) {
+    await detector.start();
+    console.log('✅ Bot resumed — was running before this restart');
+  } else {
+    console.log('⏸ Bot booted in STOPPED state (last known state was stopped) — press Start Bot to begin');
+  }
 }
 
 main().catch(console.error);

@@ -177,6 +177,21 @@ export function clearManualHalt() {
   setStrategyValue('manualHaltActive', '0');
 }
 
+// ── NEW: persisted bot run-state (fixes "bot auto-restarts after Stop") ──────
+// Previously the bot's running/stopped flag lived only as an in-memory default
+// in dashboard.ts (`let botState = 'running'`), never written anywhere durable.
+// Any process restart (platform recycle, redeploy, crash) reset it back to that
+// hardcoded default and index.ts's main() called detector.start() unconditionally
+// — from the outside, that looks exactly like "stops, then restarts itself a
+// few seconds later." This makes the flag durable across restarts, the same
+// way settings already are.
+export function getPersistedRunState(): boolean {
+  return getStrategyValue('botRunning') === '1';
+}
+export function setPersistedRunState(running: boolean) {
+  setStrategyValue('botRunning', running ? '1' : '0');
+}
+
 // ── Combined status block reused by GET /api/settings and GET /api/bot/status ─
 export function getStrategyStatus() {
   const skip = getSkipStatus();

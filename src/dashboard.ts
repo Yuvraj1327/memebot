@@ -7,7 +7,7 @@ import { getPaperStats, getWalletSOLBalance, resolveBuySolAmount } from './execu
 import { CONFIG } from './config';
 import { requireAuth, createNonce, verifySignature } from './walletauth';
 import { getAllSettings, applySettingsUpdate } from './settingstore';
-import { getRiskStatus, getStrategyStatus, clearManualHalt } from './riskmanager';
+import { getRiskStatus, getStrategyStatus, clearManualHalt, getPersistedRunState, setPersistedRunState } from './riskmanager';
 import type { BotControls, BotState } from './types';
 
 const app = express();
@@ -64,10 +64,21 @@ app.post('/api/config', (req, res) => {
 // Replaces the old boolean BOT_ACTIVE with the explicit states the spec calls
 // for. isBotActive()/emitTrade() keep their exact prior signatures so every
 // existing caller (index.ts, positionManager.ts) keeps working unchanged.
-let botState: BotState = 'running'; // bot runs on boot, matching prior default (BOT_ACTIVE = true)
+// Loads the LAST KNOWN state from before any restart, instead of hardcoding
+// 'running' every time the process boots. This is the actual fix for "bot
+// auto-restarts a few seconds after Stop": previously this was always
+// 'running' on module load, with nothing durable backing it, so any process
+// restart (Render recycle, redeploy, crash) silently resumed trading
+// regardless of what the user had last clicked.
+let botState: BotState = getPersistedRunState() ? 'running' : 'stopped';
 
 function setBotState(next: BotState) {
   botState = next;
+  // Only persist the two durable terminal states — never a transient one
+  // (starting/stopping/emergency_stop), so a restart mid-transition doesn't
+  // get stuck resuming an in-between state.
+  if (next === 'running') setPersistedRunState(true);
+  else if (next === 'stopped' || next === 'paused'  ) setPersistedRunState(false);
   io.emit('botStatus', { state: botState, active: botState === 'running', ...getStrategyStatus() });
 }
 
