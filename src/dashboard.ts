@@ -7,8 +7,8 @@ import { getPaperStats, getWalletSOLBalance } from './executor';
 import { CONFIG } from './config';
 import { requireAuth, createNonce, verifySignature } from './walletauth';
 import { getAllSettings, applySettingsUpdate } from './settingstore';
-import { getRiskStatus } from './riskmanager';
-import type { BotControls } from './types';
+import { getRiskStatus, getStrategyStatus, clearManualHalt, canBuyToday } from './riskmanager';
+import type { BotControls, BotState } from './types';
 
 const app = express();
 const httpServer = createServer(app);
@@ -60,13 +60,32 @@ app.post('/api/config', (req, res) => {
   res.json({ success: true });
 });
 
-let BOT_ACTIVE = true;
-app.post('/api/bot/toggle', (_req, res) => {
-  BOT_ACTIVE = !BOT_ACTIVE;
-  io.emit('botStatus', { active: BOT_ACTIVE });
-  res.json({ status: BOT_ACTIVE ? 'running' : 'paused' });
-});
-export function isBotActive() { return BOT_ACTIVE; }
+// ── Bot state machine ─────────────────────────────────────────────────────────
+// Replaces the old boolean BOT_ACTIVE with the explicit states the spec calls
+// for. isBotActive()/emitTrade() keep their exact prior signatures so every
+// existing caller (index.ts, positionManager.ts) keeps working unchanged.
+let botState: BotState = 'running'; // bot runs on boot, matching prior default (BOT_ACTIVE = true)
+
+function setBotState(next: BotState) {
+  botState = next;
+  io.emit('botStatus', { state: botState, active: botState === 'running', ...getStrategyStatus() });
+}
+
+export function isBotActive() { return botState === 'running'; }
+export function getBotState(): BotState { return botState; }
+
+/** Called from index.ts right before it would otherwise skip a token because
+ *  the bot isn't "running": if the daily limit gate has cleared (new day, or
+ *  autoResumeNextDay), flips the state back to running automatically. */
+export function tryAutoResumeFromDailyLimit(): void {
+  if (botState !== 'daily_limit_reached') return;
+  if (canBuyToday().ok) setBotState('running');
+}
+
+/** Called from index.ts when a buy attempt is blocked by the daily limit. */
+export function markDailyLimitReached(): void {
+  if (botState === 'running') setBotState('daily_limit_reached');
+}
 
 io.on('connection', () => console.log('📡 Client connected'));
 
@@ -83,46 +102,81 @@ export function setBotControls(c: BotControls) {
   controls = c;
 }
 
-app.post('/api/bot/start', requireAuth, async (_req, res) => {
+async function handleBotStart(_req: any, res: any) {
   if (!controls) return res.status(503).json({ error: 'Bot controls not ready yet' });
+  setBotState('starting');
   await controls.start();
-  BOT_ACTIVE = true;
-  io.emit('botStatus', { active: true, state: 'running' });
-  res.json({ status: 'running' });
-});
+  setBotState('running');
+  res.json({ status: botState });
+}
 
-app.post('/api/bot/stop', requireAuth, (_req, res) => {
+function handleBotStop(_req: any, res: any) {
   if (!controls) return res.status(503).json({ error: 'Bot controls not ready yet' });
+  setBotState('stopping');
   controls.stop();
-  BOT_ACTIVE = false;
-  io.emit('botStatus', { active: false, state: 'stopped' });
-  res.json({ status: 'stopped' });
-});
+  setBotState('stopped');
+  res.json({ status: botState });
+}
 
-app.post('/api/bot/pause', requireAuth, (_req, res) => {
-  BOT_ACTIVE = false;
-  io.emit('botStatus', { active: false, state: 'paused' });
-  res.json({ status: 'paused' });
-});
+function handleBotPause(_req: any, res: any) {
+  setBotState('paused');
+  res.json({ status: botState });
+}
 
-app.post('/api/bot/resume', requireAuth, (_req, res) => {
-  BOT_ACTIVE = true;
-  io.emit('botStatus', { active: true, state: 'running' });
-  res.json({ status: 'running' });
-});
+function handleBotResume(_req: any, res: any) {
+  clearManualHalt(); // relevant when autoResumeNextDay=false and the limit had halted buying
+  setBotState('running');
+  res.json({ status: botState });
+}
 
-app.post('/api/emergency-sell', requireAuth, async (_req, res) => {
+async function handleEmergencySell(_req: any, res: any) {
   if (!controls) return res.status(503).json({ error: 'Bot controls not ready yet' });
   try {
+    setBotState('emergency_stop');
     const closed = await controls.emergencySell();
     io.emit('emergencySell', { closed, time: Date.now() });
-    res.json({ success: true, closed });
+    // Emergency sell intentionally does NOT auto-resume buying — an operator
+    // must explicitly call resume, same as a manual pause.
+    setBotState('paused');
+    res.json({ success: true, closed, status: botState });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err?.message });
   }
-});
+}
 
-// ── Phantom Wallet authentication ─────────────────────────────────────────────
+function handleBotStatus(_req: any, res: any) {
+  res.json({
+    active: botState === 'running',
+    state: botState,
+    ...getStrategyStatus(),
+  });
+}
+
+// Existing /api/bot/* paths (unchanged behavior/response shape) ...
+app.post('/api/bot/toggle', (_req, res) => {
+  setBotState(botState === 'running' ? 'paused' : 'running');
+  res.json({ status: botState === 'running' ? 'running' : 'paused' });
+});
+app.post('/api/bot/start', requireAuth, handleBotStart);
+app.post('/api/bot/stop', requireAuth, handleBotStop);
+app.post('/api/bot/pause', requireAuth, handleBotPause);
+app.post('/api/bot/resume', requireAuth, handleBotResume);
+app.post('/api/emergency-sell', requireAuth, handleEmergencySell);
+app.get('/api/bot/status', handleBotStatus);
+
+// ... plus bare /bot/* aliases (spec asked for these exact paths). Same handlers,
+// no duplicated logic — just mounted on a second path for compatibility.
+app.post('/bot/start', requireAuth, handleBotStart);
+app.post('/bot/stop', requireAuth, handleBotStop);
+app.post('/bot/pause', requireAuth, handleBotPause);
+app.post('/bot/resume', requireAuth, handleBotResume);
+app.post('/bot/emergency-sell', requireAuth, handleEmergencySell);
+app.get('/bot/status', handleBotStatus);
+
+// ── Wallet authentication (Solana Wallet Standard — Phantom, Solflare, Backpack,
+// Glow, Nightly, Coinbase Wallet, Trust Wallet, or any compliant wallet). The
+// verification itself (ed25519 signature over a signed nonce) is wallet-agnostic
+// by construction; `provider` is optional and only used for informational logging.
 app.post('/api/auth/nonce', (req, res) => {
   const { publicKey } = req.body || {};
   if (!publicKey) return res.status(400).json({ error: 'publicKey required' });
@@ -130,11 +184,11 @@ app.post('/api/auth/nonce', (req, res) => {
 });
 
 app.post('/api/auth/verify', (req, res) => {
-  const { publicKey, signature } = req.body || {};
+  const { publicKey, signature, provider } = req.body || {};
   if (!publicKey || !signature) {
     return res.status(400).json({ error: 'publicKey and signature required' });
   }
-  const token = verifySignature(publicKey, signature);
+  const token = verifySignature(publicKey, signature, provider);
   if (!token) return res.status(401).json({ error: 'Signature verification failed' });
   res.json({ token, wallet: publicKey });
 });
@@ -155,12 +209,16 @@ app.get('/api/portfolio', (_req, res) => {
 
 // ── Settings (read current live config + any persisted overrides) ────────────
 app.get('/api/settings', (_req, res) => {
-  res.json({ current: CONFIG, persistedOverrides: getAllSettings() });
+  res.json({
+    current: CONFIG,
+    persistedOverrides: getAllSettings(),
+    ...getStrategyStatus(), // skipCount, currentSkipCounter, buyAmountUSD, todayTrades, remainingTrades, dailyLimitReached
+  });
 });
 
 app.post('/api/settings', requireAuth, (req, res) => {
   const updated = applySettingsUpdate(req.body || {});
-  res.json({ success: true, current: updated });
+  res.json({ success: true, current: updated, ...getStrategyStatus() });
 });
 
 // ── Risk status ────────────────────────────────────────────────────────────

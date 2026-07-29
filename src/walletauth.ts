@@ -1,10 +1,15 @@
 // src/walletAuth.ts
-// Phantom Wallet authentication: standard "sign a nonce" flow.
+// Authentication for ANY wallet implementing the Solana Wallet Standard
+// (Phantom, Solflare, Backpack, Glow, Nightly, Coinbase Wallet, Trust Wallet,
+// or any other compliant wallet) via the standard "sign a nonce" flow:
 //   1) frontend calls POST /api/auth/nonce { publicKey } -> gets a message
-//   2) Phantom signs that message with wallet.signMessage()
-//   3) frontend calls POST /api/auth/verify { publicKey, signature } (base58)
-//   4) we verify the ed25519 signature against the wallet's own public key
-//      and issue a session token used as a Bearer token on control endpoints.
+//   2) the connected wallet signs it via the Wallet Standard's
+//      `solana:signMessage` feature (same call shape across all wallets)
+//   3) frontend calls POST /api/auth/verify { publicKey, signature, provider? }
+//   4) we verify the ed25519 signature against the wallet's own public key —
+//      this check is identical regardless of which wallet produced it, so
+//      nothing here is or ever was Phantom-specific — and issue a session
+//      token used as a Bearer token on control endpoints.
 //
 // Requires the `tweetnacl` package (npm install tweetnacl) — bs58 is already
 // a dependency of this project (used in config.ts).
@@ -27,6 +32,16 @@ db.exec(`
   );
 `);
 
+// `last_provider` is informational only (which wallet extension the user
+// picked — Phantom/Solflare/Backpack/...); it plays no role in verification.
+function ensureColumn(table: string, column: string, ddl: string) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as any[];
+  if (!cols.some(c => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+}
+ensureColumn('wallets', 'last_provider', 'last_provider TEXT');
+
 const NONCE_TTL_MS = 5 * 60 * 1000;
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -43,8 +58,13 @@ export function createNonce(address: string): string {
   return message;
 }
 
-/** Verifies a Phantom-signed nonce and, if valid, issues a session token. */
-export function verifySignature(address: string, signatureB58: string): string | null {
+/**
+ * Verifies a signed nonce from ANY Solana Wallet Standard wallet and, if
+ * valid, issues a session token. `provider` is an optional, free-form label
+ * (e.g. "Phantom", "Solflare", "Backpack") supplied by the frontend purely
+ * for display/logging — it is never used in the verification decision.
+ */
+export function verifySignature(address: string, signatureB58: string, provider?: string): string | null {
   const entry = pendingNonces.get(address);
   if (!entry || entry.expires < Date.now()) return null;
 
@@ -60,9 +80,9 @@ export function verifySignature(address: string, signatureB58: string): string |
   pendingNonces.delete(address);
 
   db.prepare(
-    `INSERT INTO wallets (address, last_login) VALUES (?, CURRENT_TIMESTAMP)
-     ON CONFLICT(address) DO UPDATE SET last_login = CURRENT_TIMESTAMP`
-  ).run(address);
+    `INSERT INTO wallets (address, last_login, last_provider) VALUES (?, CURRENT_TIMESTAMP, ?)
+     ON CONFLICT(address) DO UPDATE SET last_login = CURRENT_TIMESTAMP, last_provider = excluded.last_provider`
+  ).run(address, provider ?? null);
 
   const token = randomToken(32);
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
@@ -71,6 +91,8 @@ export function verifySignature(address: string, signatureB58: string): string |
     address,
     expiresAt
   );
+
+  console.log(`🔑 Wallet authenticated: ${address.slice(0, 8)}...${provider ? ` via ${provider}` : ''}`);
 
   return token;
 }
@@ -83,18 +105,18 @@ export function getSessionWallet(token: string | undefined): string | null {
   return row.address;
 }
 
-/** Express middleware: protects control endpoints behind a connected Phantom wallet. */
+/** Express middleware: protects control endpoints behind any connected, verified wallet. */
 export function requireAuth(req: any, res: any, next: any) {
   const header = req.headers['authorization'] || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : undefined;
   const walletAddress = getSessionWallet(token);
   if (!walletAddress) {
-    return res.status(401).json({ error: 'Unauthorized — connect Phantom wallet first' });
+    return res.status(401).json({ error: 'Unauthorized — connect a Solana wallet first' });
   }
   req.wallet = walletAddress;
   next();
 }
 
 export function listWallets() {
-  return db.prepare(`SELECT address, first_seen, last_login FROM wallets ORDER BY last_login DESC`).all();
+  return db.prepare(`SELECT address, first_seen, last_login, last_provider FROM wallets ORDER BY last_login DESC`).all();
 }

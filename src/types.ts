@@ -3,6 +3,15 @@
 // still define their own local interfaces (Position, PaperPosition, SafetyResult)
 // and that's left as-is; these are only the new cross-module contracts.
 
+export type BotState =
+  | 'starting'
+  | 'running'
+  | 'paused'
+  | 'stopping'
+  | 'stopped'
+  | 'emergency_stop'
+  | 'daily_limit_reached';
+
 export interface BotControls {
   start: () => Promise<void> | void;
   stop: () => void;

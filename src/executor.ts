@@ -83,6 +83,8 @@ export async function getSolUsdPrice(): Promise<number> {
   if (cachedSolPrice && Date.now() - cachedSolPrice.ts < SOL_PRICE_CACHE_MS) {
     return cachedSolPrice.price;
   }
+
+  // Primary: Jupiter
   try {
     const res = await axios.get(`https://api.jup.ag/price/v2?ids=${SOL_MINT}`, { timeout: 5000 });
     const price = res.data?.data?.[SOL_MINT]?.price;
@@ -91,10 +93,31 @@ export async function getSolUsdPrice(): Promise<number> {
       return price;
     }
   } catch {
-    // fall through to cache/fallback below
+    // fall through to secondary source
   }
-  if (cachedSolPrice) return cachedSolPrice.price; // last known good price
-  console.warn('⚠️  Could not fetch live SOL/USD price — using fallback $150 for this buy');
+
+  // Secondary (live, independent provider): CoinGecko
+  try {
+    const res = await axios.get(
+      'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd',
+      { timeout: 5000 }
+    );
+    const price = res.data?.solana?.usd;
+    if (price > 0) {
+      cachedSolPrice = { price, ts: Date.now() };
+      console.warn('⚠️  Jupiter price unavailable — used CoinGecko fallback for SOL/USD');
+      return price;
+    }
+  } catch {
+    // fall through to cached/static fallback below
+  }
+
+  if (cachedSolPrice) {
+    console.warn(`⚠️  Live SOL/USD price unavailable — using last known price ($${cachedSolPrice.price})`);
+    return cachedSolPrice.price;
+  }
+
+  console.warn('⚠️  No live SOL/USD price available from any provider — using static fallback $150');
   return 150;
 }
 
