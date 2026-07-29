@@ -31,7 +31,7 @@ const NUMERIC_KEYS = new Set([
 ]);
 
 // Keys that must be parsed back to booleans when loaded/applied
-const BOOLEAN_KEYS = new Set(['autoResumeNextDay']);
+const BOOLEAN_KEYS = new Set(['autoResumeNextDay', 'paperTrading']);
 
 export function setSetting(key: string, value: string | number) {
   db.prepare(

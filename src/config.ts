@@ -27,11 +27,20 @@ export const CONFIG = {
   MIN_LIQUIDITY_SOL:     parseFloat(process.env.MIN_LIQUIDITY_SOL      || '0.001'),
   PRIORITY_FEE_LAMPORTS: parseInt(process.env.PRIORITY_FEE_LAMPORTS   || '1000000'),
 
-  // ── Skip-buy strategy / daily limit / $ sizing (new) ──────────────────────
-  // All four are also stored in the settings DB (settingsStore.ts) and
-  // loaded over these env defaults at boot via loadPersistedSettings().
+  // ── Skip-buy strategy / $ sizing ──────────────────────────────────────────
+  // All of these are also stored in the settings DB (settingsStore.ts) and
+  // loaded over these env defaults at boot via loadPersistedSettings(), and
+  // can be changed live via POST /api/settings without a restart.
   skipCount:          parseInt(process.env.SKIP_COUNT           || '3'),     // skip N tokens, then buy
-  dailyTradeLimit:    parseInt(process.env.DAILY_TRADE_LIMIT    || '100'),   // max successful BUYs/day
-  buyAmountUSD:        parseFloat(process.env.BUY_AMOUNT_USD     || '1'),     // fixed $ size per buy
+  dailyTradeLimit:    parseInt(process.env.DAILY_TRADE_LIMIT    || '100'),   // kept for stats display only — NOT enforced (no daily cap)
+  buyAmountUSD:        parseFloat(process.env.BUY_AMOUNT_USD     || '1'),     // fixed $ size per buy, used when buyAmountMode === 'USD'
+  buyAmountMode:      (process.env.BUY_AMOUNT_MODE || 'USD') as 'USD' | 'SOL', // 'USD' converts via live price; 'SOL' uses BUY_AMOUNT_SOL directly
   autoResumeNextDay:  (process.env.AUTO_RESUME_NEXT_DAY ?? 'true') === 'true',
+
+  // ── Live, mutable trading-mode flag ───────────────────────────────────────
+  // Previously this was a `const PAPER_MODE = process.env.PAPER_TRADING === 'true'`
+  // captured once at module load in executor.ts — toggling it from the dashboard
+  // updated process.env but the already-loaded const never changed, so the bot
+  // kept running whichever mode it booted in. Now it's a live CONFIG field.
+  paperTrading:       (process.env.PAPER_TRADING ?? 'true') === 'true',
 };

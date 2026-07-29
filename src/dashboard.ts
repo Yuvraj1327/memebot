@@ -3,11 +3,11 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import { getRecentTrades } from './logger';
-import { getPaperStats, getWalletSOLBalance } from './executor';
+import { getPaperStats, getWalletSOLBalance, resolveBuySolAmount } from './executor';
 import { CONFIG } from './config';
 import { requireAuth, createNonce, verifySignature } from './walletauth';
 import { getAllSettings, applySettingsUpdate } from './settingstore';
-import { getRiskStatus, getStrategyStatus, clearManualHalt, canBuyToday } from './riskmanager';
+import { getRiskStatus, getStrategyStatus, clearManualHalt } from './riskmanager';
 import type { BotControls, BotState } from './types';
 
 const app = express();
@@ -74,19 +74,6 @@ function setBotState(next: BotState) {
 export function isBotActive() { return botState === 'running'; }
 export function getBotState(): BotState { return botState; }
 
-/** Called from index.ts right before it would otherwise skip a token because
- *  the bot isn't "running": if the daily limit gate has cleared (new day, or
- *  autoResumeNextDay), flips the state back to running automatically. */
-export function tryAutoResumeFromDailyLimit(): void {
-  if (botState !== 'daily_limit_reached') return;
-  if (canBuyToday().ok) setBotState('running');
-}
-
-/** Called from index.ts when a buy attempt is blocked by the daily limit. */
-export function markDailyLimitReached(): void {
-  if (botState === 'running') setBotState('daily_limit_reached');
-}
-
 io.on('connection', () => console.log('📡 Client connected'));
 
 export function emitTrade(event: string, data: any) {
@@ -104,18 +91,59 @@ export function setBotControls(c: BotControls) {
 
 async function handleBotStart(_req: any, res: any) {
   if (!controls) return res.status(503).json({ error: 'Bot controls not ready yet' });
+
+  // Live-mode validation (paper mode has no wallet-balance requirement — the
+  // paper wallet manages its own balance and simply declines a buy it can't
+  // afford). requireAuth on this route already guarantees a connected,
+  // signature-verified operator wallet before we even get here.
+  if (!CONFIG.paperTrading) {
+    try {
+      const [balance, required] = await Promise.all([getWalletSOLBalance(), resolveBuySolAmount()]);
+      if (balance < required) {
+        return res.status(400).json({
+          error: 'Insufficient SOL Balance.',
+          solBalance: balance,
+          requiredSol: required,
+        });
+      }
+    } catch (err: any) {
+      return res.status(500).json({ error: `Could not validate wallet balance: ${err?.message ?? err}` });
+    }
+  }
+
   setBotState('starting');
   await controls.start();
   setBotState('running');
   res.json({ status: botState });
 }
 
+// Watches open positions after Stop is requested, so they're managed to
+// completion instead of abandoned — the bot only reports fully 'stopped'
+// once every open position has closed.
+let stopWatcher: NodeJS.Timeout | null = null;
+function watchForFullyStopped() {
+  if (stopWatcher) clearInterval(stopWatcher);
+  stopWatcher = setInterval(() => {
+    if (!controls) return;
+    if (controls.getOpenPositionCount() === 0) {
+      if (stopWatcher) clearInterval(stopWatcher);
+      stopWatcher = null;
+      setBotState('stopped');
+    }
+  }, 3000);
+}
+
 function handleBotStop(_req: any, res: any) {
   if (!controls) return res.status(503).json({ error: 'Bot controls not ready yet' });
-  setBotState('stopping');
-  controls.stop();
-  setBotState('stopped');
-  res.json({ status: botState });
+  controls.stop(); // stops new-token scanning/buying immediately; open positions keep being managed
+
+  if (controls.getOpenPositionCount() > 0) {
+    setBotState('stopping'); // still selling down existing positions
+    watchForFullyStopped();
+  } else {
+    setBotState('stopped');
+  }
+  res.json({ status: botState, openPositions: controls.getOpenPositionCount() });
 }
 
 function handleBotPause(_req: any, res: any) {
@@ -196,7 +224,12 @@ app.post('/api/auth/verify', (req, res) => {
 // ── Wallet balance / Portfolio ────────────────────────────────────────────────
 app.get('/api/wallet/balance', async (_req, res) => {
   try {
-    res.json({ solBalance: await getWalletSOLBalance() });
+    const solBalance = await getWalletSOLBalance();
+    if (CONFIG.paperTrading) {
+      return res.json({ solBalance, paperMode: true, requiredSol: null, sufficientForBuy: true });
+    }
+    const requiredSol = await resolveBuySolAmount();
+    res.json({ solBalance, paperMode: false, requiredSol, sufficientForBuy: solBalance >= requiredSol });
   } catch (err: any) {
     res.status(500).json({ error: err?.message });
   }

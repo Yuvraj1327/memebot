@@ -17,6 +17,7 @@ export interface BotControls {
   stop: () => void;
   emergencySell: () => Promise<string[]>;
   getPortfolio: () => PortfolioSummary;
+  getOpenPositionCount: () => number;
 }
 
 export interface OpenPositionView {

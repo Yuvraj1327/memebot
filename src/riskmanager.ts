@@ -145,52 +145,34 @@ export function resetSkipCounter() {
   setSkipCounter(0);
 }
 
-// ── NEW: Daily BUY-only trade limit ──────────────────────────────────────────
+// ── Daily BUY counter (STATS ONLY — no longer enforced) ──────────────────────
+// The 100-trade daily cap has been removed per spec: the bot must run
+// continuously until Stop/Emergency Sell/a critical error, never on trade
+// count. `todayTrades` is kept purely for the "Trades Today" dashboard stat.
 export function getDailyTradeStatus() {
   const row = getDayRow();
-  const limit = CONFIG.dailyTradeLimit;
   const todayTrades = row.buys ?? 0;
   return {
     todayTrades,
-    remainingTrades: Math.max(limit - todayTrades, 0),
-    dailyLimitReached: todayTrades >= limit,
+    remainingTrades: null as number | null, // null = unlimited (no cap enforced)
+    dailyLimitReached: false,               // never true anymore — kept for API shape compatibility
   };
 }
 
-/** Call immediately after a CONFIRMED successful BUY (not on sell/close). */
+/** Call immediately after a CONFIRMED successful BUY (not on sell/close). Stats only. */
 export function recordBuy() {
   const day = todayKey();
   getDayRow(day);
   db.prepare(`UPDATE risk_state SET buys = buys + 1 WHERE day = ?`).run(day);
-  const status = getDailyTradeStatus();
-  if (status.dailyLimitReached) {
-    logger.info(`Daily Limit Reached — ${status.todayTrades}/${CONFIG.dailyTradeLimit} buys today`);
-    if (!CONFIG.autoResumeNextDay) setStrategyValue('manualHaltActive', '1');
-  }
-  return status;
+  return getDailyTradeStatus();
 }
 
-/**
- * Gate checked before every buy attempt. When autoResumeNextDay is true
- * (default), the daily row simply rolls over at UTC midnight (a fresh row
- * with buys=0 is created by getDayRow), so buying resumes automatically —
- * no extra bookkeeping needed. When false, once the limit is hit the bot
- * stays halted (even across a day rollover) until /api/bot/resume is called.
- */
+/** No-op kept for API/back-compat — the daily trade limit is no longer enforced. */
 export function canBuyToday(): { ok: boolean; reason?: string } {
-  if (!CONFIG.autoResumeNextDay && getStrategyValue('manualHaltActive') === '1') {
-    return { ok: false, reason: 'Daily Trade Limit Reached (manual resume required)' };
-  }
-
-  const status = getDailyTradeStatus();
-  if (status.dailyLimitReached) {
-    return { ok: false, reason: 'Daily Trade Limit Reached' };
-  }
-
   return { ok: true };
 }
 
-/** Called from POST /api/bot/resume to clear a manual halt. Safe no-op otherwise. */
+/** No-op kept for API/back-compat — there is no manual halt to clear anymore. */
 export function clearManualHalt() {
   setStrategyValue('manualHaltActive', '0');
 }
@@ -204,8 +186,9 @@ export function getStrategyStatus() {
     currentSkipCounter: skip.skipCounter,
     nextBuyAfter: skip.nextBuyAfter,
     buyAmountUSD: CONFIG.buyAmountUSD,
+    buyAmountMode: CONFIG.buyAmountMode,
     todayTrades: daily.todayTrades,
-    remainingTrades: daily.remainingTrades,
-    dailyLimitReached: daily.dailyLimitReached,
+    remainingTrades: daily.remainingTrades,   // null = unlimited
+    dailyLimitReached: daily.dailyLimitReached, // always false now
   };
 }

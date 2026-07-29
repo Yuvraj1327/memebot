@@ -13,81 +13,24 @@ interface Position {
   txSig: string;
   highestPrice: number;      // track peak for trailing logic
   priceHistory: number[];    // for momentum detection
+  solSpent: number;          // actual SOL spent on entry (derived from buyAmountUSD at buy time)
 }
 
 const positions = new Map<string, Position>();
 
-// ── Momentum detector ─────────────────────────────────────────────────────────
-// Returns true if price gained MOMENTUM_THRESHOLD% in last 3 readings (~6s)
-function hasMomentum(priceHistory: number[], entryPrice: number): boolean {
-  if (priceHistory.length < 3) return false;
-  const recent = priceHistory.slice(-3);
-  const gainPct = ((recent[recent.length - 1] - recent[0]) / recent[0]) * 100;
-  const totalGainPct = ((recent[recent.length - 1] - entryPrice) / entryPrice) * 100;
-
-  // Momentum = fast recent rise OR very strong total gain
-  return gainPct >= CONFIG.MOMENTUM_THRESHOLD || totalGainPct >= 80;
-}
-
 // ── Exit decision ─────────────────────────────────────────────────────────────
-function shouldExit(
-  pricePct: number,
-  elapsedMs: number,
-  momentum: boolean,
-  priceHistory: number[]
-): { exit: boolean; reason: string } {
-
-  // 1. STOP LOSS — exit immediately if down more than 30%
-  //    (fires at any time, even within first 5 seconds)
-  if (pricePct <= -30) {
-    return { exit: true, reason: `🛑 Stop loss: ${pricePct.toFixed(1)}%` };
+// Per the current strategy spec: BUY -> wait the configured Hold Time -> SELL,
+// unconditionally — profit/loss is never a factor. This replaces the previous
+// momentum/stop-loss/take-profit/hard-timeout logic, which contradicted that
+// requirement. CONFIG.HOLD_TIME_MS is live/settings-backed, so changing "Hold
+// Time" in the dashboard takes effect on the very next price tick, no restart.
+function shouldExit(elapsedMs: number): { exit: boolean; reason: string } {
+  if (elapsedMs >= CONFIG.HOLD_TIME_MS) {
+    return {
+      exit: true,
+      reason: `⏰ Hold time reached (${(CONFIG.HOLD_TIME_MS / 1000).toFixed(0)}s) — selling regardless of P&L`,
+    };
   }
-
-  // 2. HARD FLOOR — if we had gains but now retracing badly, cut early
-  //    (only after 10s to avoid noise)
-  if (elapsedMs > 10_000 && priceHistory.length >= 5) {
-    const peak = Math.max(...priceHistory);
-    const peakPct = ((peak - priceHistory[0]) / priceHistory[0]) * 100;
-    const currentVsPeak = ((priceHistory[priceHistory.length - 1] - peak) / peak) * 100;
-    // If we were up 30%+ but retraced 40% from peak → exit
-    if (peakPct >= 30 && currentVsPeak <= -40) {
-      return { exit: true, reason: `📉 Retrace exit: peak was +${peakPct.toFixed(1)}%, now ${currentVsPeak.toFixed(1)}% from peak` };
-    }
-  }
-
-  // 3. NORMAL HOLD — 30 seconds, price between +10% and +100%
-  //    This is the standard case per your requirements
-  if (
-    !momentum &&
-    elapsedMs >= CONFIG.HOLD_TIME_MS &&          // 30s
-    pricePct >= CONFIG.TAKE_PROFIT_MIN &&         // +10%
-    pricePct <= CONFIG.TAKE_PROFIT_MAX            // +100%
-  ) {
-    return { exit: true, reason: `🎯 Take profit at 30s: +${pricePct.toFixed(1)}%` };
-  }
-
-  // 4. MOMENTUM HOLD — 45 seconds, strong upward movement detected
-  //    Hold longer if price is still rising fast
-  if (
-    momentum &&
-    elapsedMs >= CONFIG.HOLD_TIME_MOMENTUM_MS &&  // 45s
-    pricePct >= CONFIG.TAKE_PROFIT_MIN             // still at least +10%
-  ) {
-    return { exit: true, reason: `🚀 Momentum exit at 45s: +${pricePct.toFixed(1)}%` };
-  }
-
-  // 5. MAX GAIN — if price >100% at any time after 15s → take profit immediately
-  //    Don't be greedy, lock it in
-  if (elapsedMs >= 15_000 && pricePct > CONFIG.TAKE_PROFIT_MAX) {
-    return { exit: true, reason: `💰 Max gain exit: +${pricePct.toFixed(1)}%` };
-  }
-
-  // 6. HARD TIMEOUT — always exit at 60s no matter what
-  //    Never hold a pump.fun token longer than 60 seconds
-  if (elapsedMs >= 60_000) {
-    return { exit: true, reason: `⏰ Hard timeout at 60s: ${pricePct.toFixed(1)}%` };
-  }
-
   return { exit: false, reason: '' };
 }
 
@@ -96,7 +39,8 @@ export async function openPosition(
   mint: PublicKey,
   entryPrice: number,
   tokenAmount: number,
-  txSig: string
+  txSig: string,
+  solSpent?: number
 ) {
   const key = mint.toString();
 
@@ -116,20 +60,33 @@ export async function openPosition(
     txSig,
     highestPrice: safeEntry,
     priceHistory: [safeEntry],
+    solSpent: solSpent ?? CONFIG.BUY_AMOUNT_SOL, // fallback keeps old callers working
   });
 
   console.log(`\n📈 Position opened`);
   console.log(`   Token    : ${key.slice(0, 8)}...`);
   console.log(`   Entry    : $${safeEntry.toExponential(4)}`);
   console.log(`   Amount   : ${tokenAmount.toLocaleString()} tokens`);
-  console.log(`   Strategy : Hold 30s normal / 45s if momentum\n`);
+  console.log(`   Strategy : Sell after ${(CONFIG.HOLD_TIME_MS / 1000).toFixed(0)}s, regardless of P&L\n`);
 
-  // Real-time event for the dashboard/WebSocket clients
+  // Real-time events for the dashboard/WebSocket clients.
+  // 'positionOpened' carries full position detail for the Portfolio panel;
+  // 'trade' is the event name the dashboard's live trade feed/history/win-rate
+  // code actually listens for — it was never emitted anywhere before this,
+  // which is why the dashboard never updated after a paper (or real) buy.
   emitTrade('positionOpened', {
     mint: key,
     entryPrice: safeEntry,
     tokenAmount,
     txSig,
+    time: Date.now(),
+  });
+  emitTrade('trade', {
+    type: 'BUY',
+    mint: key,
+    price: safeEntry,
+    amount: tokenAmount,
+    tx_sig: txSig,
     time: Date.now(),
   });
 
@@ -143,52 +100,57 @@ function startMonitoring(mint: PublicKey) {
   let closing = false;
 
   intervalId = setInterval(async () => {
-    if (closing) return;
+    // NOTE: this callback used to have no try/catch at all. Since it's an
+    // async function passed to setInterval, any thrown/rejected error inside
+    // became an unhandled promise rejection — which, under Node's default
+    // unhandled-rejection behavior, crashes the entire process. That was the
+    // most likely cause of the bot "stopping automatically after a few
+    // seconds": the very first price-monitor tick to hit any error (a flaky
+    // RPC call, a divide-by-zero, anything) could kill the whole bot.
+    try {
+      if (closing) return;
 
-    const pos = positions.get(key);
-    if (!pos) {
-      clearInterval(intervalId);
-      return;
+      const pos = positions.get(key);
+      if (!pos) {
+        clearInterval(intervalId);
+        return;
+      }
+
+      const elapsedMs  = Date.now() - pos.buyTime;
+      const elapsedSec = (elapsedMs / 1000).toFixed(1);
+
+      // Fetch current price (display/PnL only — no longer drives the exit decision)
+      let currentPrice = await getTokenPrice(mint);
+      if (currentPrice <= 0) {
+        // Price not available yet (too new) — use entry price + small noise
+        // so position doesn't look stuck at 0%
+        currentPrice = pos.entryPrice * (1 + (Math.random() - 0.5) * 0.05);
+      }
+
+      pos.priceHistory.push(currentPrice);
+      if (pos.priceHistory.length > 30) pos.priceHistory.shift(); // keep last 30 readings
+      if (currentPrice > pos.highestPrice) pos.highestPrice = currentPrice;
+
+      const pricePct  = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
+      const pnlLabel  = pricePct >= 0 ? `+${pricePct.toFixed(1)}%` : `${pricePct.toFixed(1)}%`;
+      const remainMs  = Math.max(CONFIG.HOLD_TIME_MS - elapsedMs, 0);
+
+      console.log(
+        `⏱  ${key.slice(0, 8)}... | ${elapsedSec}s | ${pnlLabel} | selling in ${(remainMs / 1000).toFixed(1)}s`
+      );
+
+      const { exit, reason } = shouldExit(elapsedMs);
+
+      if (exit) {
+        closing = true;
+        clearInterval(intervalId);
+        console.log(`\n${reason}`);
+        await closePosition(mint, currentPrice, pricePct);
+      }
+    } catch (err: any) {
+      console.error(`⚠️  Position monitor error for ${key.slice(0, 8)}...:`, err?.message ?? err);
+      // Deliberately swallow — a monitoring hiccup should never take down the bot.
     }
-
-    const elapsedMs  = Date.now() - pos.buyTime;
-    const elapsedSec = (elapsedMs / 1000).toFixed(1);
-
-    // Fetch current price
-    let currentPrice = await getTokenPrice(mint);
-    if (currentPrice <= 0) {
-      // Price not available yet (too new) — use entry price + small noise
-      // so position doesn't look stuck at 0%
-      currentPrice = pos.entryPrice * (1 + (Math.random() - 0.5) * 0.05);
-    }
-
-    // Update history + peak
-    pos.priceHistory.push(currentPrice);
-    if (pos.priceHistory.length > 30) pos.priceHistory.shift(); // keep last 30 readings
-    if (currentPrice > pos.highestPrice) pos.highestPrice = currentPrice;
-
-    const pricePct  = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
-    const momentum  = hasMomentum(pos.priceHistory, pos.entryPrice);
-    const holdLabel = momentum ? '45s mode' : '30s mode';
-    const pnlLabel  = pricePct >= 0 ? `+${pricePct.toFixed(1)}%` : `${pricePct.toFixed(1)}%`;
-
-    console.log(
-      `⏱  ${key.slice(0, 8)}... | ` +
-      `${elapsedSec}s | ` +
-      `${pnlLabel} | ` +
-      `${holdLabel}${momentum ? ' 🔥' : ''}`
-    );
-
-    // Check exit conditions
-    const { exit, reason } = shouldExit(pricePct, elapsedMs, momentum, pos.priceHistory);
-
-    if (exit) {
-      closing = true;
-      clearInterval(intervalId);
-      console.log(`\n${reason}`);
-      await closePosition(mint, currentPrice, pricePct);
-    }
-
   }, 2000); // poll every 2 seconds
 }
 
@@ -232,7 +194,7 @@ async function closePosition(mint: PublicKey, exitPrice: number, pricePct: numbe
 
   // Risk-manager bookkeeping + real-time event (position leaves active tracking
   // either way — a failed sell still needs manual follow-up, tracked in logs above)
-  const pnlSolEstimate = (CONFIG.BUY_AMOUNT_SOL * pricePct) / 100;
+  const pnlSolEstimate = (pos.solSpent * pricePct) / 100;
   recordClosedTrade(pnlSolEstimate);
 
   emitTrade('positionClosed', {
@@ -244,6 +206,15 @@ async function closePosition(mint: PublicKey, exitPrice: number, pricePct: numbe
     holdSec,
     txSig: result.txSig,
     success: result.success,
+    time: Date.now(),
+  });
+  emitTrade('trade', {
+    type: 'SELL',
+    mint: key,
+    price: exitPrice,
+    amount: pos.tokenAmount,
+    pnl_pct: pricePct,
+    tx_sig: result.txSig,
     time: Date.now(),
   });
 
@@ -260,6 +231,10 @@ export function getOpenPositions() {
     highestPrice: p.highestPrice,
     elapsedMs:    Date.now() - p.buyTime,
   }));
+}
+
+export function getOpenPositionCount(): number {
+  return positions.size;
 }
 
 export function getPortfolioSummary() {
@@ -290,9 +265,10 @@ export class PositionManager {
     mint: PublicKey,
     entryPrice: number,
     tokenAmount: number,
-    txSig: string
+    txSig: string,
+    solSpent?: number
   ) {
-    return openPosition(mint, entryPrice, tokenAmount, txSig);
+    return openPosition(mint, entryPrice, tokenAmount, txSig, solSpent);
   }
 
   getOpenPositions() {

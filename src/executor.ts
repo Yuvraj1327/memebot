@@ -8,7 +8,15 @@ import { connection, wallet, CONFIG } from './config';
 import { logTrade } from './logger';
 
 // ── Paper Trading State ───────────────────────────────────────────────────────
-const PAPER_MODE = process.env.PAPER_TRADING === 'true';
+// NOTE: this used to be `const PAPER_MODE = process.env.PAPER_TRADING === 'true'`,
+// captured once at module load. That meant toggling paper/live from the dashboard
+// never actually changed anything at runtime — the bot kept running whichever
+// mode it happened to boot in, which is why "Paper Balance never changes" could
+// happen (real-trade code path silently taken instead). CONFIG.paperTrading is
+// live and settings-backed, so every check below reflects the current setting.
+function isPaperMode(): boolean {
+  return CONFIG.paperTrading;
+}
 
 interface PaperPosition {
   mint: string;
@@ -127,14 +135,26 @@ export async function getSolAmountForUsd(usdAmount: number): Promise<number> {
   return usdAmount / solPrice;
 }
 
+/**
+ * Resolves the SOL amount to spend on the next buy, per CONFIG.buyAmountMode:
+ *  - 'SOL': use CONFIG.BUY_AMOUNT_SOL directly, no price lookup needed.
+ *  - 'USD' (default): convert CONFIG.buyAmountUSD via the live SOL/USD price.
+ * Both paper and real buys — and the live-mode wallet-balance check in
+ * dashboard.ts — all go through this single function so they can never drift.
+ */
+export async function resolveBuySolAmount(): Promise<number> {
+  if (CONFIG.buyAmountMode === 'SOL') return CONFIG.BUY_AMOUNT_SOL;
+  return getSolAmountForUsd(CONFIG.buyAmountUSD);
+}
+
 // ── Real balance helpers (still useful for stats) ─────────────────────────────
 export async function getWalletSOLBalance(): Promise<number> {
-  if (PAPER_MODE) return paperState.solBalance;
+  if (isPaperMode()) return paperState.solBalance;
   return (await connection.getBalance(wallet.publicKey)) / LAMPORTS_PER_SOL;
 }
 
 export async function getTokenRawAmount(tokenMint: PublicKey): Promise<number> {
-  if (PAPER_MODE) {
+  if (isPaperMode()) {
     const pos = paperState.positions.get(tokenMint.toString());
     return pos ? pos.tokenAmount : 0;
   }
@@ -153,8 +173,9 @@ async function paperBuy(
 ): Promise<{ success: boolean; txSig?: string; entryPrice?: number; solSpent?: number }> {
   const mintStr = tokenMint.toString();
 
-  // Fixed $ buy amount, converted from the live SOL price — never hardcoded SOL.
-  const solIn = await getSolAmountForUsd(CONFIG.buyAmountUSD);
+  try {
+  // Configured buy amount (USD converted at live price, or SOL directly) — never hardcoded.
+  const solIn = await resolveBuySolAmount();
 
   if (paperState.solBalance < solIn + 0.002) {
     paperLog(`❌ Insufficient paper SOL: ${paperState.solBalance.toFixed(4)} (need ~${(solIn + 0.002).toFixed(4)})`);
@@ -184,7 +205,7 @@ async function paperBuy(
   const fakeSig = `PAPER_BUY_${mintStr.slice(0, 8)}_${Date.now()}`;
 
   paperLog(`✅ Bought ${mintStr.slice(0, 8)}...`);
-  paperLog(`   Buy amount : $${CONFIG.buyAmountUSD} ≈ ${solIn.toFixed(6)} SOL`);
+  paperLog(`   Buy amount : ${CONFIG.buyAmountMode === 'SOL' ? solIn.toFixed(6)+' SOL' : '$'+CONFIG.buyAmountUSD+' ≈ '+solIn.toFixed(6)+' SOL'}`);
   paperLog(`   Entry price: $${entryPrice.toExponential(4)}`);
   paperLog(`   Tokens got : ${tokenAmount.toLocaleString()}`);
   paperLog(`   Paper bal  : ${paperState.solBalance.toFixed(4)} SOL`);
@@ -193,6 +214,10 @@ async function paperBuy(
   logTrade({ mint: mintStr, type: 'BUY', price: entryPrice, amount: tokenAmount, txSig: fakeSig });
 
   return { success: true, txSig: fakeSig, entryPrice, solSpent: solIn };
+  } catch (err: any) {
+    console.error('❌ Paper buy failed:', err?.message ?? err);
+    return { success: false };
+  }
 }
 
 // ── PAPER SELL ────────────────────────────────────────────────────────────────
@@ -201,6 +226,7 @@ async function paperSell(
   exitPrice: number
 ): Promise<{ success: boolean; txSig?: string }> {
   const mintStr = tokenMint.toString();
+  try {
   const pos = paperState.positions.get(mintStr);
 
   if (!pos) {
@@ -251,6 +277,10 @@ async function paperSell(
   logTrade({ mint: mintStr, type: 'SELL', price: exitPrice, amount: pos.tokenAmount, pnlPct, txSig: fakeSig });
 
   return { success: true, txSig: fakeSig };
+  } catch (err: any) {
+    console.error('❌ Paper sell failed:', err?.message ?? err);
+    return { success: false };
+  }
 }
 
 // ── PUBLIC: executeBuy ────────────────────────────────────────────────────────
@@ -258,7 +288,7 @@ export async function executeBuy(
   tokenMint: PublicKey,
   _poolAddress: PublicKey
 ): Promise<{ success: boolean; txSig?: string; entryPrice?: number; solSpent?: number }> {
-  if (PAPER_MODE) {
+  if (isPaperMode()) {
     paperLog(`🛒 Paper buying ${tokenMint.toString().slice(0, 8)}...`);
     return paperBuy(tokenMint);
   }
@@ -286,7 +316,8 @@ export async function executeBuy(
     const userTokenAcct = await getAssociatedTokenAddress(tokenMint, wallet.publicKey);
 
     // Fixed $ buy amount, converted from the live SOL price — never hardcoded SOL.
-    const solAmount = await getSolAmountForUsd(CONFIG.buyAmountUSD);
+    // Configured buy amount (USD converted at live price, or SOL directly) — never hardcoded.
+    const solAmount = await resolveBuySolAmount();
     const amountLamports = Math.floor(solAmount * LAMPORTS_PER_SOL);
     const ixs: any[]    = [];
 
@@ -340,7 +371,7 @@ export async function executeBuy(
     await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
 
     console.log(`✅ Buy confirmed: ${sig}`);
-    console.log(`   Buy amount : $${CONFIG.buyAmountUSD} ≈ ${solAmount.toFixed(6)} SOL`);
+    console.log(`   Buy amount : ${CONFIG.buyAmountMode === 'SOL' ? solAmount.toFixed(6)+' SOL' : '$'+CONFIG.buyAmountUSD+' ≈ '+solAmount.toFixed(6)+' SOL'}`);
     await new Promise(r => setTimeout(r, 2000));
     const entryPrice = await getTokenPrice(tokenMint);
     const resolvedEntry = entryPrice || 0.000000001;
@@ -360,7 +391,7 @@ export async function executeSell(
   tokenMint: PublicKey,
   amountOverride?: number
 ): Promise<{ success: boolean; txSig?: string }> {
-  if (PAPER_MODE) {
+  if (isPaperMode()) {
     paperLog(`💰 Paper selling ${tokenMint.toString().slice(0, 8)}...`);
     const exitPrice = await getOrSimulatePrice(tokenMint);
     return paperSell(tokenMint, exitPrice);
