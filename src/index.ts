@@ -163,17 +163,11 @@ async function main() {
     });
   });
 
-  // Fix for "bot auto-restarts a few seconds after Stop": this used to call
-  // detector.start() unconditionally on every boot. isBotActive() now reflects
-  // the PERSISTED run-state (see dashboard.ts/riskManager.ts), not a hardcoded
-  // default — so a restart resumes whatever the user last actually chose,
-  // instead of always coming back up running.
-  if (isBotActive()) {
-    await detector.start();
-    console.log('✅ Bot resumed — was running before this restart');
-  } else {
-    console.log('⏸ Bot booted in STOPPED state (last known state was stopped) — press Start Bot to begin');
-  }
+  // The bot ALWAYS boots stopped. It never auto-starts — not after a page
+  // refresh, a backend restart/redeploy, a wallet (re)connection, or a mode
+  // switch. detector.start() is only ever invoked from an explicit user
+  // click on "Start Bot" (POST /bot/start, handled in dashboard.ts).
+  console.log('⏸ Bot booted in STOPPED state — press Start Bot to begin');
 }
 
 main().catch(console.error);
