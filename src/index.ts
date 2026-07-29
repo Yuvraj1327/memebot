@@ -137,8 +137,7 @@ async function main() {
         mint,
         buyResult.entryPrice,
         tokenAmount,
-        buyResult.txSig!,
-        buyResult.solSpent
+        buyResult.txSig!
       );
     });
   });
