@@ -2,9 +2,10 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
+import { PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { getRecentTrades } from './logger';
 import { getPaperStats, getWalletSOLBalance, resolveBuySolAmount, getSolUsdPrice } from './executor';
-import { CONFIG } from './config';
+import { CONFIG, connection } from './config';
 import { requireAuth, createNonce, verifySignature } from './walletauth';
 import { getAllSettings, applySettingsUpdate } from './settingstore';
 import { getRiskStatus, getStrategyStatus, clearManualHalt } from './riskmanager';
@@ -182,7 +183,7 @@ function handleBotStatus(_req: any, res: any) {
 }
 
 // Existing /api/bot/* paths (unchanged behavior/response shape) ...
-app.post('/api/bot/toggle', (_req, res) => {
+app.post('/api/bot/toggle', requireAuth, (_req, res) => {
   setBotState(botState === 'running' ? 'paused' : 'running');
   res.json({ status: botState === 'running' ? 'running' : 'paused' });
 });
@@ -233,6 +234,23 @@ app.get('/api/wallet/balance', async (_req, res) => {
     res.json({ solBalance, paperMode: false, requiredSol, sufficientForBuy: solBalance >= requiredSol });
   } catch (err: any) {
     res.status(500).json({ error: err?.message });
+  }
+});
+
+// Looks up the SOL balance for ANY given public key (the operator's connected
+// browser wallet, not the bot's own wallet) using the backend's own already-
+// configured RPC connection. This exists because direct browser->public-RPC
+// calls (api.mainnet-beta.solana.com) are commonly blocked/rate-limited or
+// lack permissive CORS for POST requests — that was the actual root cause of
+// a funded wallet displaying $0.00: the client-side fetch was failing
+// silently and falling back to zero, not any error in the balance math.
+app.get('/api/wallet/lookup/:address', async (req, res) => {
+  try {
+    const pubkey = new PublicKey(req.params.address);
+    const lamports = await connection.getBalance(pubkey, 'confirmed');
+    res.json({ solBalance: lamports / LAMPORTS_PER_SOL });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Invalid address or RPC error' });
   }
 });
 
