@@ -177,19 +177,30 @@ async function handleEmergencySell(_req: any, res: any) {
   }
 }
 
+// Paper Trading must be completely independent of any wallet — but requireAuth
+// was being applied unconditionally to Start/Stop/Emergency Sell, so those
+// always 401'd in Paper mode with no wallet connected (visible directly as
+// "POST /bot/start 401 (Unauthorized)" in the browser console). This skips
+// the wallet-auth check entirely while in Paper mode; Live mode still
+// requires a verified wallet, since that's genuinely authorizing real funds.
+function requireAuthUnlessPaper(req: any, res: any, next: any) {
+  if (CONFIG.paperTrading) return next();
+  return requireAuth(req, res, next);
+}
+
 // Only three ways to change botState now: Start Bot, Stop Bot, Emergency Sell.
 // The old pause/resume/toggle routes were a second, unvalidated path to the
 // same state (resume skipped the live-mode balance check entirely; pause
 // never actually stopped the detector or cleared monitoring intervals) —
 // removed rather than left as latent duplicate logic.
-app.post('/api/bot/start', requireAuth, handleBotStart);
-app.post('/api/bot/stop', requireAuth, handleBotStop);
-app.post('/api/emergency-sell', requireAuth, handleEmergencySell);
+app.post('/api/bot/start', requireAuthUnlessPaper, handleBotStart);
+app.post('/api/bot/stop', requireAuthUnlessPaper, handleBotStop);
+app.post('/api/emergency-sell', requireAuthUnlessPaper, handleEmergencySell);
 app.get('/api/bot/status', handleBotStatus);
 
-app.post('/bot/start', requireAuth, handleBotStart);
-app.post('/bot/stop', requireAuth, handleBotStop);
-app.post('/bot/emergency-sell', requireAuth, handleEmergencySell);
+app.post('/bot/start', requireAuthUnlessPaper, handleBotStart);
+app.post('/bot/stop', requireAuthUnlessPaper, handleBotStop);
+app.post('/bot/emergency-sell', requireAuthUnlessPaper, handleEmergencySell);
 app.get('/bot/status', handleBotStatus);
 
 // ── Wallet authentication (Solana Wallet Standard — Phantom, Solflare, Backpack,
