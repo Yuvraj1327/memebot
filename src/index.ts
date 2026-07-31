@@ -24,6 +24,8 @@ import {
   getStrategyStatus,
 } from './riskmanager';
 import { logger } from './logger';
+import { CONFIG } from './config';
+
 
 // ── Global crash guards ───────────────────────────────────────────────────────
 // This is the fix for "bot stops automatically after a few seconds": an
@@ -148,13 +150,19 @@ async function main() {
 
       console.log(`📦 Got ${tokenAmount} raw tokens`);
 
-      await positionManager.openPosition(
-        mint,
-        buyResult.entryPrice,
-        tokenAmount,
-        buyResult.txSig!,
-        buyResult.solSpent
-      );
+      // Only open a position in the positionManager for LIVE trades.
+      // Paper trades are fully tracked inside executor.ts's paperState—
+      // opening a second entry in positionManager would cause double sells,
+      // double P&L accounting, and cross-contamination of paper/live portfolio.
+      if (!CONFIG.paperTrading) {
+        await positionManager.openPosition(
+          mint,
+          buyResult.entryPrice,
+          tokenAmount,
+          buyResult.txSig!,
+          buyResult.solSpent
+        );
+      }
     }).catch((err) => {
       // This .catch() is the other half of the crash-bug fix: previously the
       // promise returned by queue.add(...) was never awaited or caught, so
@@ -181,95 +189,3 @@ setInterval(() => {
 
 
 
-
-
-
-
-
-
-// // src/index.ts
-// import https from 'https';
-// import PQueue from 'p-queue';
-// import { PublicKey } from '@solana/web3.js';
-// import { TokenDetector } from './detector';
-// import { PositionManager } from './positionManager';
-// import { runSafetyChecks } from './safety';
-// import { executeBuy, getTokenRawAmount } from './executor';
-// import { emitNewToken, isBotActive } from './dashboard';
-
-// const queue          = new PQueue({ concurrency: 1 });
-// const detector       = new TokenDetector();
-// const positionManager = new PositionManager();
-
-// // ── Trade counter ─────────────────────────────────────────────────────────────
-// let tradeCount  = 0;
-// const MAX_TRADES = 20;  // ← yahan se change karo jitna chahiye
-
-// function canTrade(): boolean {
-//   if (tradeCount >= MAX_TRADES) {
-//     console.log('🛑 Max ' + MAX_TRADES + ' trades reached — bot stopped buying');
-//     return false;
-//   }
-//   return true;
-// }
-
-// async function main() {
-//   console.log('🤖 MemeRush Bot Starting...');
-//   console.log('📊 Max trades today: ' + MAX_TRADES);
-
-//   detector.on('newToken', ({ mint, source }) => {
-//     emitNewToken(mint.toString(), source ?? 'unknown');
-
-//     if (!isBotActive()) return;
-//     if (!canTrade()) return; // ← trade limit check
-
-//     queue.add(async () => {
-//       console.log('\n🔔 New token: ' + mint.toString());
-//       console.log('📊 Trade ' + (tradeCount + 1) + '/' + MAX_TRADES);
-
-//       // Safety check
-//       const safety = await runSafetyChecks(mint, mint);
-//       if (!safety.passed) {
-//         console.log('❌ Safety failed: ' + safety.reason);
-//         return;
-//       }
-
-//       // Buy karo
-//       const buyResult = await executeBuy(mint, mint);
-//       if (!buyResult.success || !buyResult.entryPrice) {
-//         console.log('❌ Buy failed');
-//         return;
-//       }
-
-//       // Trade count badhao — sirf successful buy pe
-//       tradeCount++;
-//       console.log('✅ Trade ' + tradeCount + '/' + MAX_TRADES + ' executed');
-
-//       await new Promise(r => setTimeout(r, 2000));
-
-//       const tokenAmount = await getTokenRawAmount(mint);
-//       if (tokenAmount <= 0) {
-//         console.warn('⚠️  No token balance found');
-//         return;
-//       }
-
-//       await positionManager.openPosition(
-//         mint,
-//         buyResult.entryPrice,
-//         tokenAmount,
-//         buyResult.txSig!
-//       );
-//     });
-//   });
-
-//   await detector.start();
-//   console.log('✅ Bot is live and listening...');
-// }
-
-// main().catch(console.error);
-
-// // Render jaagta rahe
-// setInterval(() => {
-//   https.get('https://memebot-4.onrender.com/health', () => {})
-//     .on('error', () => {});
-// }, 10 * 60 * 1000);

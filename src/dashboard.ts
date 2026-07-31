@@ -94,6 +94,10 @@ export function setBotControls(c: BotControls) {
 async function handleBotStart(_req: any, res: any) {
   if (!controls) return res.status(503).json({ error: 'Bot controls not ready yet' });
 
+  // Cancel any pending stop-watcher so a Start mid-stop doesn't leave two
+  // watchers running simultaneously — only one watcher should ever exist.
+  if (stopWatcher) { clearInterval(stopWatcher); stopWatcher = null; }
+
   // Live-mode validation (paper mode has no wallet-balance requirement — the
   // paper wallet manages its own balance and simply declines a buy it can't
   // afford). requireAuth on this route already guarantees a connected,
@@ -149,12 +153,19 @@ function handleBotStop(_req: any, res: any) {
 }
 
 function handleBotPause(_req: any, res: any) {
+  if (!controls) return res.status(503).json({ error: 'Bot controls not ready yet' });
+  controls.stop(); // pause = stop scanning; same as Stop Bot from the bot's perspective
   setBotState('paused');
   res.json({ status: botState });
 }
 
-function handleBotResume(_req: any, res: any) {
-  clearManualHalt(); // relevant when autoResumeNextDay=false and the limit had halted buying
+async function handleBotResume(_req: any, res: any) {
+  if (!controls) return res.status(503).json({ error: 'Bot controls not ready yet' });
+  clearManualHalt();
+  // Clear any lingering stop-watcher before restarting.
+  if (stopWatcher) { clearInterval(stopWatcher); stopWatcher = null; }
+  setBotState('starting');
+  await controls.start(); // actually restart the detector, not just flip a flag
   setBotState('running');
   res.json({ status: botState });
 }
@@ -163,11 +174,12 @@ async function handleEmergencySell(_req: any, res: any) {
   if (!controls) return res.status(503).json({ error: 'Bot controls not ready yet' });
   try {
     setBotState('emergency_stop');
+    controls.stop(); // halt new token scanning immediately
+    if (stopWatcher) { clearInterval(stopWatcher); stopWatcher = null; }
     const closed = await controls.emergencySell();
     io.emit('emergencySell', { closed, time: Date.now() });
-    // Emergency sell intentionally does NOT auto-resume buying — an operator
-    // must explicitly call resume, same as a manual pause.
-    setBotState('paused');
+    // Emergency sell = full stop. Bot must be explicitly started again by the operator.
+    setBotState('stopped');
     res.json({ success: true, closed, status: botState });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err?.message });
@@ -182,10 +194,14 @@ function handleBotStatus(_req: any, res: any) {
   });
 }
 
-// Existing /api/bot/* paths (unchanged behavior/response shape) ...
-app.post('/api/bot/toggle', requireAuth, (_req, res) => {
-  setBotState(botState === 'running' ? 'paused' : 'running');
-  res.json({ status: botState === 'running' ? 'running' : 'paused' });
+// /api/bot/* routes
+app.post('/api/bot/toggle', requireAuth, async (req, res) => {
+  // Toggle properly calls start/stop via controls instead of just flipping a flag.
+  if (botState === 'running') {
+    handleBotStop(req, res);
+  } else {
+    await handleBotStart(req, res);
+  }
 });
 app.post('/api/bot/start', requireAuth, handleBotStart);
 app.post('/api/bot/stop', requireAuth, handleBotStop);
@@ -194,8 +210,7 @@ app.post('/api/bot/resume', requireAuth, handleBotResume);
 app.post('/api/emergency-sell', requireAuth, handleEmergencySell);
 app.get('/api/bot/status', handleBotStatus);
 
-// ... plus bare /bot/* aliases (spec asked for these exact paths). Same handlers,
-// no duplicated logic — just mounted on a second path for compatibility.
+// Bare /bot/* aliases — same handlers, second path for compatibility.
 app.post('/bot/start', requireAuth, handleBotStart);
 app.post('/bot/stop', requireAuth, handleBotStop);
 app.post('/bot/pause', requireAuth, handleBotPause);
@@ -295,22 +310,7 @@ httpServer.listen(PORT, () => {
   console.log('📊 API running on port ' + PORT);
 });
 
-
-app.get('/', (_req, res) => {
-  res.json({ 
-    status: 'MemeRush Bot Running ✅', 
-    uptime: Math.floor(process.uptime()) + 's',
-    paper_mode: process.env.PAPER_TRADING === 'true',
-    version: '1.0.0'
-  });
-});
-
-
-
-
-
-
-// Detected tokens store karo
+// Detected tokens store
 const detectedTokens: any[] = [];
 
 export function emitNewToken(mint: string, source: string) {
