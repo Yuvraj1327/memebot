@@ -211,7 +211,7 @@ async function paperBuy(
   paperLog(`   Paper bal  : ${paperState.solBalance.toFixed(4)} SOL`);
 
   // Transaction logging (trades table was previously never written to)
-  logTrade({ mint: mintStr, type: 'BUY', price: entryPrice, amount: tokenAmount, txSig: fakeSig });
+  logTrade({ mint: mintStr, type: 'BUY', price: entryPrice, amount: tokenAmount, txSig: fakeSig, mode: 'paper' });
 
   return { success: true, txSig: fakeSig, entryPrice, solSpent: solIn };
   } catch (err: any) {
@@ -274,7 +274,7 @@ async function paperSell(
   const fakeSig = `PAPER_SELL_${mintStr.slice(0, 8)}_${Date.now()}`;
 
   // Transaction logging (trades table was previously never written to)
-  logTrade({ mint: mintStr, type: 'SELL', price: exitPrice, amount: pos.tokenAmount, pnlPct, txSig: fakeSig });
+  logTrade({ mint: mintStr, type: 'SELL', price: exitPrice, amount: pos.tokenAmount, pnlPct, txSig: fakeSig, mode: 'paper' });
 
   return { success: true, txSig: fakeSig };
   } catch (err: any) {
@@ -376,7 +376,7 @@ export async function executeBuy(
     const entryPrice = await getTokenPrice(tokenMint);
     const resolvedEntry = entryPrice || 0.000000001;
 
-    logTrade({ mint: tokenMint.toString(), type: 'BUY', price: resolvedEntry, amount: solAmount, txSig: sig });
+    logTrade({ mint: tokenMint.toString(), type: 'BUY', price: resolvedEntry, amount: solAmount, txSig: sig, mode: 'live' });
 
     return { success: true, txSig: sig, entryPrice: resolvedEntry, solSpent: solAmount };
 
@@ -477,7 +477,7 @@ export async function executeSell(
     console.log(`✅ Sell confirmed: ${sig}`);
 
     const exitPrice = await getTokenPrice(tokenMint);
-    logTrade({ mint: tokenMint.toString(), type: 'SELL', price: exitPrice || 0, amount: rawAmount, txSig: sig });
+    logTrade({ mint: tokenMint.toString(), type: 'SELL', price: exitPrice || 0, amount: rawAmount, txSig: sig, mode: 'live' });
 
     return { success: true, txSig: sig };
 

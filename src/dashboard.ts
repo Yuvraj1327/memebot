@@ -35,8 +35,11 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
-app.get('/api/trades', (_req, res) => {
-  try { res.json(getRecentTrades(50)); } catch { res.json([]); }
+app.get('/api/trades', (req, res) => {
+  try {
+    const mode = req.query.mode === 'paper' || req.query.mode === 'live' ? req.query.mode : undefined;
+    res.json(getRecentTrades(50, mode));
+  } catch { res.json([]); }
 });
 
 app.get('/api/stats', (_req, res) => {

@@ -90,6 +90,7 @@ export async function openPosition(
     price: safeEntry,
     amount: tokenAmount,
     tx_sig: txSig,
+    mode: CONFIG.paperTrading ? 'paper' : 'live',
     time: Date.now(),
   });
 
@@ -222,6 +223,7 @@ async function closePosition(mint: PublicKey, exitPrice: number, pricePct: numbe
     amount: pos.tokenAmount,
     pnl_pct: pricePct,
     tx_sig: result.txSig,
+    mode: pos.mode,
     time: Date.now(),
   });
 

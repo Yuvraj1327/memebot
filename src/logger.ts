@@ -35,6 +35,16 @@ db.exec(`
   )
 `);
 
+// Migration: the trades table originally had no way to distinguish a paper
+// trade from a live one, so Paper and Live stats/history/PnL/win-rate were
+// always mixed together regardless of which mode was active. Existing rows
+// (recorded before this column existed) default to 'paper', since that's
+// what the bot always ran in before Live mode was added.
+const tradeCols = db.prepare(`PRAGMA table_info(trades)`).all() as any[];
+if (!tradeCols.some(c => c.name === 'mode')) {
+  db.exec(`ALTER TABLE trades ADD COLUMN mode TEXT NOT NULL DEFAULT 'paper'`);
+}
+
 export function logTrade(trade: {
   mint: string;
   type: 'BUY' | 'SELL';
@@ -42,14 +52,18 @@ export function logTrade(trade: {
   amount: number;
   pnlPct?: number;
   txSig: string;
+  mode: 'paper' | 'live';
 }) {
   const stmt = db.prepare(
-    `INSERT INTO trades (mint, type, price, amount, pnl_pct, tx_sig)
-     VALUES (?, ?, ?, ?, ?, ?)`
+    `INSERT INTO trades (mint, type, price, amount, pnl_pct, tx_sig, mode)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
   );
-  stmt.run(trade.mint, trade.type, trade.price, trade.amount, trade.pnlPct ?? null, trade.txSig);
+  stmt.run(trade.mint, trade.type, trade.price, trade.amount, trade.pnlPct ?? null, trade.txSig, trade.mode);
 }
 
-export function getRecentTrades(limit = 50) {
+export function getRecentTrades(limit = 50, mode?: 'paper' | 'live') {
+  if (mode) {
+    return db.prepare('SELECT * FROM trades WHERE mode = ? ORDER BY timestamp DESC LIMIT ?').all(mode, limit);
+  }
   return db.prepare('SELECT * FROM trades ORDER BY timestamp DESC LIMIT ?').all(limit);
 }
