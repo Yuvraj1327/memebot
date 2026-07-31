@@ -1,6 +1,7 @@
 // src/safety.ts
 import { PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { connection, CONFIG } from './config';
+import { getOrSimulatePrice } from './executor';
 
 export interface SafetyResult {
   passed: boolean;
@@ -89,6 +90,31 @@ export async function runSafetyChecks(
       }
     } catch {
       // Parse failed — skip this check
+    }
+
+    // ── 5. Market Cap filter ──────────────────────────────────────────────────
+    // Buy only if MinMarketCapUSD <= market cap <= MaxMarketCapUSD. Market cap
+    // is price (real if Jupiter has it yet, simulated fallback otherwise — the
+    // same estimate the rest of the bot already uses for brand-new tokens) ×
+    // total supply. Never a hard failure on error — an RPC hiccup here just
+    // skips the filter rather than blocking every buy.
+    try {
+      const [price, supplyInfo] = await Promise.all([
+        getOrSimulatePrice(tokenMint),
+        connection.getTokenSupply(tokenMint),
+      ]);
+      const totalSupply = supplyInfo.value.uiAmount ?? 0;
+      const marketCapUSD = price * totalSupply;
+
+      if (marketCapUSD < CONFIG.minMarketCapUSD || marketCapUSD > CONFIG.maxMarketCapUSD) {
+        return {
+          passed: false,
+          reason: 'Skipped - Market Cap Filter',
+        };
+      }
+    } catch {
+      // Could not determine market cap (RPC hiccup) — not a hard block, just warn
+      console.warn(`⚠️  Could not check market cap for ${tokenMint.toString().slice(0, 8)}...`);
     }
 
     return { passed: true, liquiditySOL };

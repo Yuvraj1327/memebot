@@ -28,6 +28,9 @@ const NUMERIC_KEYS = new Set([
   'skipCount',
   'dailyTradeLimit',
   'buyAmountUSD',
+  // Market Cap filter
+  'minMarketCapUSD',
+  'maxMarketCapUSD',
 ]);
 
 // Keys that must be parsed back to booleans when loaded/applied

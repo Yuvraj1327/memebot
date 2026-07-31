@@ -69,7 +69,7 @@ export async function getTokenPrice(tokenMint: PublicKey): Promise<number> {
 }
 
 // Simulate a price for brand-new pump.fun tokens (not yet on Jupiter price API)
-async function getOrSimulatePrice(tokenMint: PublicKey): Promise<number> {
+export async function getOrSimulatePrice(tokenMint: PublicKey): Promise<number> {
   const real = await getTokenPrice(tokenMint);
   if (real > 0) return real;
 

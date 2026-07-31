@@ -43,4 +43,11 @@ export const CONFIG = {
   // updated process.env but the already-loaded const never changed, so the bot
   // kept running whichever mode it booted in. Now it's a live CONFIG field.
   paperTrading:       (process.env.PAPER_TRADING ?? 'true') === 'true',
+
+  // ── Market Cap filter ──────────────────────────────────────────────────────
+  // Buy only if MinMarketCapUSD <= token's current market cap <= MaxMarketCapUSD.
+  // Defaults leave the filter effectively off (0 to a very high ceiling) until
+  // configured from Settings. Checked in safety.ts before every buy.
+  minMarketCapUSD:    parseFloat(process.env.MIN_MARKET_CAP_USD ?? '0'),
+  maxMarketCapUSD:    parseFloat(process.env.MAX_MARKET_CAP_USD ?? '1000000000'),
 };
