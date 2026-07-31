@@ -178,6 +178,6 @@ main().catch(console.error);
 
 // Render free tier ko jaagta rakho
 setInterval(() => {
-  https.get('https://memebot-4.onrender.com/health', () => {})
+  https.get('https://memebot-asp9.onrender.com/health', () => {})
     .on('error', () => {});
 }, 10 * 60 * 1000);
