@@ -17,17 +17,6 @@ export class TokenDetector extends EventEmitter {
   private seen = new Set<string>();
   private running = false;
   private lastSignature: string | null = null;
-  private tradeCount = 0;
-  private readonly MAX_TRADES = parseInt(process.env.MAX_TRADES || '20');
-
-  incrementTrade() {
-    this.tradeCount++;
-    console.log('📊 Trade: ' + this.tradeCount + '/' + this.MAX_TRADES);
-  }
-
-  canTrade(): boolean {
-    return this.tradeCount < this.MAX_TRADES;
-  }
 
   async start() {
     if (this.running) {
@@ -35,7 +24,6 @@ export class TokenDetector extends EventEmitter {
       return;
     }
     console.log('🔍 Starting detector (HTTP polling mode)...');
-    console.log('📊 Max trades: ' + this.MAX_TRADES);
     this.running = true;
     this.poll();
   }

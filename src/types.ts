@@ -6,17 +6,15 @@
 export type BotState =
   | 'starting'
   | 'running'
-  | 'paused'
   | 'stopping'
   | 'stopped'
-  | 'emergency_stop'
-  | 'daily_limit_reached';
+  | 'emergency_stop';
 
 export interface BotControls {
   start: () => Promise<void> | void;
   stop: () => void;
   emergencySell: () => Promise<string[]>;
-  getPortfolio: () => PortfolioSummary;
+  getPortfolio: (filterMode?: 'paper' | 'live') => PortfolioSummary;
   getOpenPositionCount: () => number;
 }
 

@@ -172,11 +172,6 @@ export function canBuyToday(): { ok: boolean; reason?: string } {
   return { ok: true };
 }
 
-/** No-op kept for API/back-compat — there is no manual halt to clear anymore. */
-export function clearManualHalt() {
-  setStrategyValue('manualHaltActive', '0');
-}
-
 // ── Combined status block reused by GET /api/settings and GET /api/bot/status ─
 export function getStrategyStatus() {
   const skip = getSkipStatus();

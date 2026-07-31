@@ -8,7 +8,7 @@ import { getPaperStats, getWalletSOLBalance, resolveBuySolAmount, getSolUsdPrice
 import { CONFIG, connection } from './config';
 import { requireAuth, createNonce, verifySignature } from './walletauth';
 import { getAllSettings, applySettingsUpdate } from './settingstore';
-import { getRiskStatus, getStrategyStatus, clearManualHalt } from './riskmanager';
+import { getRiskStatus, getStrategyStatus } from './riskmanager';
 import type { BotControls, BotState } from './types';
 
 const app = express();
@@ -23,7 +23,12 @@ const io = new Server(httpServer, {
 
 // ── APIs only — no HTML ───────────────────────────────────────────────────────
 app.get('/', (_req, res) => {
-  res.json({ status: 'MemeRush Bot Running', uptime: process.uptime() });
+  res.json({
+    status: 'MemeRush Bot Running ✅',
+    uptime: Math.floor(process.uptime()) + 's',
+    paper_mode: CONFIG.paperTrading,
+    version: '1.0.0',
+  });
 });
 
 app.get('/health', (_req, res) => {
@@ -94,10 +99,6 @@ export function setBotControls(c: BotControls) {
 async function handleBotStart(_req: any, res: any) {
   if (!controls) return res.status(503).json({ error: 'Bot controls not ready yet' });
 
-  // Cancel any pending stop-watcher so a Start mid-stop doesn't leave two
-  // watchers running simultaneously — only one watcher should ever exist.
-  if (stopWatcher) { clearInterval(stopWatcher); stopWatcher = null; }
-
   // Live-mode validation (paper mode has no wallet-balance requirement — the
   // paper wallet manages its own balance and simply declines a buy it can't
   // afford). requireAuth on this route already guarantees a connected,
@@ -152,40 +153,6 @@ function handleBotStop(_req: any, res: any) {
   res.json({ status: botState, openPositions: controls.getOpenPositionCount() });
 }
 
-function handleBotPause(_req: any, res: any) {
-  if (!controls) return res.status(503).json({ error: 'Bot controls not ready yet' });
-  controls.stop(); // pause = stop scanning; same as Stop Bot from the bot's perspective
-  setBotState('paused');
-  res.json({ status: botState });
-}
-
-async function handleBotResume(_req: any, res: any) {
-  if (!controls) return res.status(503).json({ error: 'Bot controls not ready yet' });
-  clearManualHalt();
-  // Clear any lingering stop-watcher before restarting.
-  if (stopWatcher) { clearInterval(stopWatcher); stopWatcher = null; }
-  setBotState('starting');
-  await controls.start(); // actually restart the detector, not just flip a flag
-  setBotState('running');
-  res.json({ status: botState });
-}
-
-async function handleEmergencySell(_req: any, res: any) {
-  if (!controls) return res.status(503).json({ error: 'Bot controls not ready yet' });
-  try {
-    setBotState('emergency_stop');
-    controls.stop(); // halt new token scanning immediately
-    if (stopWatcher) { clearInterval(stopWatcher); stopWatcher = null; }
-    const closed = await controls.emergencySell();
-    io.emit('emergencySell', { closed, time: Date.now() });
-    // Emergency sell = full stop. Bot must be explicitly started again by the operator.
-    setBotState('stopped');
-    res.json({ success: true, closed, status: botState });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err?.message });
-  }
-}
-
 function handleBotStatus(_req: any, res: any) {
   res.json({
     active: botState === 'running',
@@ -194,27 +161,34 @@ function handleBotStatus(_req: any, res: any) {
   });
 }
 
-// /api/bot/* routes
-app.post('/api/bot/toggle', requireAuth, async (req, res) => {
-  // Toggle properly calls start/stop via controls instead of just flipping a flag.
-  if (botState === 'running') {
-    handleBotStop(req, res);
-  } else {
-    await handleBotStart(req, res);
+async function handleEmergencySell(_req: any, res: any) {
+  if (!controls) return res.status(503).json({ error: 'Bot controls not ready yet' });
+  try {
+    setBotState('emergency_stop');
+    const closed = await controls.emergencySell();
+    io.emit('emergencySell', { closed, time: Date.now() });
+    // Per spec: Emergency Sell is one of exactly two ways to stop the bot
+    // (the other being Stop Bot). It always lands on 'stopped', never a
+    // separate 'paused' state — there is no third state to resume from.
+    setBotState('stopped');
+    res.json({ success: true, closed, status: botState });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message });
   }
-});
+}
+
+// Only three ways to change botState now: Start Bot, Stop Bot, Emergency Sell.
+// The old pause/resume/toggle routes were a second, unvalidated path to the
+// same state (resume skipped the live-mode balance check entirely; pause
+// never actually stopped the detector or cleared monitoring intervals) —
+// removed rather than left as latent duplicate logic.
 app.post('/api/bot/start', requireAuth, handleBotStart);
 app.post('/api/bot/stop', requireAuth, handleBotStop);
-app.post('/api/bot/pause', requireAuth, handleBotPause);
-app.post('/api/bot/resume', requireAuth, handleBotResume);
 app.post('/api/emergency-sell', requireAuth, handleEmergencySell);
 app.get('/api/bot/status', handleBotStatus);
 
-// Bare /bot/* aliases — same handlers, second path for compatibility.
 app.post('/bot/start', requireAuth, handleBotStart);
 app.post('/bot/stop', requireAuth, handleBotStop);
-app.post('/bot/pause', requireAuth, handleBotPause);
-app.post('/bot/resume', requireAuth, handleBotResume);
 app.post('/bot/emergency-sell', requireAuth, handleEmergencySell);
 app.get('/bot/status', handleBotStatus);
 
@@ -281,9 +255,10 @@ app.get('/api/price/sol-usd', async (_req, res) => {
   }
 });
 
-app.get('/api/portfolio', (_req, res) => {
+app.get('/api/portfolio', (req, res) => {
   if (!controls) return res.json({ openPositions: [], openCount: 0 });
-  res.json(controls.getPortfolio());
+  const mode = req.query.mode === 'paper' || req.query.mode === 'live' ? req.query.mode : undefined;
+  res.json(controls.getPortfolio(mode));
 });
 
 // ── Settings (read current live config + any persisted overrides) ────────────
@@ -310,7 +285,12 @@ httpServer.listen(PORT, () => {
   console.log('📊 API running on port ' + PORT);
 });
 
-// Detected tokens store
+
+
+
+
+
+// Detected tokens store karo
 const detectedTokens: any[] = [];
 
 export function emitNewToken(mint: string, source: string) {

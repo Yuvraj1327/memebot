@@ -26,7 +26,6 @@ import {
 import { logger } from './logger';
 import { CONFIG } from './config';
 
-
 // ── Global crash guards ───────────────────────────────────────────────────────
 // This is the fix for "bot stops automatically after a few seconds": an
 // unhandled promise rejection anywhere (the price-monitor's setInterval
@@ -61,7 +60,7 @@ setBotControls({
                             // until Start Bot is pressed again (per current spec).
   },
   emergencySell: () => closeAllPositions('Manual emergency sell via API'),
-  getPortfolio: () => getPortfolioSummary(),
+  getPortfolio: (filterMode) => getPortfolioSummary(filterMode),
   getOpenPositionCount: () => getOpenPositionCount(),
 });
 
@@ -102,7 +101,10 @@ async function main() {
     }
 
     // Portfolio-level risk management: concurrent exposure + daily loss limit
-    const risk = canOpenPosition(getOpenPositions().length);
+    // Scoped to the currently active mode only — a Paper position left open
+    // must never count against Live's concurrent-position limit, or vice versa.
+    const currentMode = CONFIG.paperTrading ? 'paper' : 'live';
+    const risk = canOpenPosition(getOpenPositions(currentMode).length);
     if (!risk.ok) {
       console.log(`🚫 Risk check blocked trade: ${risk.reason}`);
       return;
@@ -150,19 +152,13 @@ async function main() {
 
       console.log(`📦 Got ${tokenAmount} raw tokens`);
 
-      // Only open a position in the positionManager for LIVE trades.
-      // Paper trades are fully tracked inside executor.ts's paperState—
-      // opening a second entry in positionManager would cause double sells,
-      // double P&L accounting, and cross-contamination of paper/live portfolio.
-      if (!CONFIG.paperTrading) {
-        await positionManager.openPosition(
-          mint,
-          buyResult.entryPrice,
-          tokenAmount,
-          buyResult.txSig!,
-          buyResult.solSpent
-        );
-      }
+      await positionManager.openPosition(
+        mint,
+        buyResult.entryPrice,
+        tokenAmount,
+        buyResult.txSig!,
+        buyResult.solSpent
+      );
     }).catch((err) => {
       // This .catch() is the other half of the crash-bug fix: previously the
       // promise returned by queue.add(...) was never awaited or caught, so
@@ -185,7 +181,3 @@ setInterval(() => {
   https.get('https://memebot-4.onrender.com/health', () => {})
     .on('error', () => {});
 }, 10 * 60 * 1000);
-
-
-
-

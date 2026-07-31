@@ -14,6 +14,7 @@ interface Position {
   highestPrice: number;      // track peak for trailing logic
   priceHistory: number[];    // for momentum detection
   solSpent: number;          // actual SOL spent on entry (derived from buyAmountUSD at buy time)
+  mode: 'paper' | 'live';    // captured at open time — never changes even if the mode toggle flips later
 }
 
 const positions = new Map<string, Position>();
@@ -62,6 +63,7 @@ export async function openPosition(
     highestPrice: safeEntry,
     priceHistory: [safeEntry],
     solSpent: solSpent ?? CONFIG.BUY_AMOUNT_SOL, // fallback keeps old callers working
+    mode: CONFIG.paperTrading ? 'paper' : 'live',
   });
 
   console.log(`\n📈 Position opened`);
@@ -230,15 +232,18 @@ async function closePosition(mint: PublicKey, exitPrice: number, pricePct: numbe
 }
 
 // ── Standalone accessors (used by dashboard for Portfolio / Emergency Sell) ──
-export function getOpenPositions() {
-  return Array.from(positions.values()).map(p => ({
-    mint:         p.mint.toString(),
-    entryPrice:   p.entryPrice,
-    buyTime:      p.buyTime,
-    tokenAmount:  p.tokenAmount,
-    highestPrice: p.highestPrice,
-    elapsedMs:    Date.now() - p.buyTime,
-  }));
+export function getOpenPositions(filterMode?: 'paper' | 'live') {
+  return Array.from(positions.values())
+    .filter(p => !filterMode || p.mode === filterMode)
+    .map(p => ({
+      mint:         p.mint.toString(),
+      entryPrice:   p.entryPrice,
+      buyTime:      p.buyTime,
+      tokenAmount:  p.tokenAmount,
+      highestPrice: p.highestPrice,
+      elapsedMs:    Date.now() - p.buyTime,
+      mode:         p.mode,
+    }));
 }
 
 /**
@@ -274,8 +279,8 @@ export function getOpenPositionCount(): number {
   return positions.size;
 }
 
-export function getPortfolioSummary() {
-  const open = getOpenPositions();
+export function getPortfolioSummary(filterMode?: 'paper' | 'live') {
+  const open = getOpenPositions(filterMode);
   return { openPositions: open, openCount: open.length };
 }
 
@@ -306,15 +311,5 @@ export class PositionManager {
     solSpent?: number
   ) {
     return openPosition(mint, entryPrice, tokenAmount, txSig, solSpent);
-  }
-
-  getOpenPositions() {
-    return Array.from(positions.values()).map(p => ({
-      mint:        p.mint.toString(),
-      entryPrice:  p.entryPrice,
-      buyTime:     p.buyTime,
-      tokenAmount: p.tokenAmount,
-      elapsedMs:   Date.now() - p.buyTime,
-    }));
   }
 }
