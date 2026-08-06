@@ -122,37 +122,29 @@ async function handleBotStart(_req: any, res: any) {
   }
 
   setBotState('starting');
-  await controls.start();
+  try {
+    await controls.start();
+  } catch (err: any) {
+    // Previously uncaught: a throw here left botState stuck at 'starting'
+    // forever, with no response ever sent back to the client.
+    setBotState('stopped');
+    return res.status(500).json({ error: `Failed to start bot: ${err?.message ?? err}` });
+  }
   setBotState('running');
   res.json({ status: botState });
 }
 
-// Watches open positions after Stop is requested, so they're managed to
-// completion instead of abandoned — the bot only reports fully 'stopped'
-// once every open position has closed.
-let stopWatcher: NodeJS.Timeout | null = null;
-function watchForFullyStopped() {
-  if (stopWatcher) clearInterval(stopWatcher);
-  stopWatcher = setInterval(() => {
-    if (!controls) return;
-    if (controls.getOpenPositionCount() === 0) {
-      if (stopWatcher) clearInterval(stopWatcher);
-      stopWatcher = null;
-      setBotState('stopped');
-    }
-  }, 3000);
-}
-
 function handleBotStop(_req: any, res: any) {
   if (!controls) return res.status(503).json({ error: 'Bot controls not ready yet' });
-  controls.stop(); // stops new-token scanning/buying immediately; open positions keep being managed
-
-  if (controls.getOpenPositionCount() > 0) {
-    setBotState('stopping'); // still selling down existing positions
-    watchForFullyStopped();
-  } else {
-    setBotState('stopped');
-  }
+  // Hard stop, per spec: scanning, buying, selling and every timer/interval
+  // stop immediately (controls.stop() calls detector.stop() + clears every
+  // position-monitor interval synchronously). There is nothing left running
+  // afterward to "wait" for, so the state transitions directly to 'stopped' —
+  // waiting here for open positions to reach 0 would deadlock forever, since
+  // their monitoring was just deliberately cleared and nothing would ever
+  // close them again until Start Bot or Emergency Sell.
+  controls.stop();
+  setBotState('stopped');
   res.json({ status: botState, openPositions: controls.getOpenPositionCount() });
 }
 
@@ -166,8 +158,8 @@ function handleBotStatus(_req: any, res: any) {
 
 async function handleEmergencySell(_req: any, res: any) {
   if (!controls) return res.status(503).json({ error: 'Bot controls not ready yet' });
+  setBotState('emergency_stop');
   try {
-    setBotState('emergency_stop');
     const closed = await controls.emergencySell();
     io.emit('emergencySell', { closed, time: Date.now() });
     // Per spec: Emergency Sell is one of exactly two ways to stop the bot
@@ -176,6 +168,9 @@ async function handleEmergencySell(_req: any, res: any) {
     setBotState('stopped');
     res.json({ success: true, closed, status: botState });
   } catch (err: any) {
+    // Previously: botState stayed stuck at 'emergency_stop' forever on error,
+    // since this branch never reset it back.
+    setBotState('stopped');
     res.status(500).json({ success: false, error: err?.message });
   }
 }
@@ -284,7 +279,7 @@ app.get('/api/settings', (_req, res) => {
   });
 });
 
-app.post('/api/settings', requireAuth, (req, res) => {
+app.post('/api/settings', requireAuthUnlessPaper, (req, res) => {
   const updated = applySettingsUpdate(req.body || {});
   res.json({ success: true, current: updated, ...getStrategyStatus() });
 });
